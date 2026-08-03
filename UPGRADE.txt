@@ -1,24 +1,38 @@
-Extension Switchboard v0.4.0
+Extension Switchboard v0.5.0
 ============================
+
+New
+---
+- Export categories and extension assignments as a readable JSON file.
+- Import a previously exported configuration.
+- Import validates the file before changing the saved configuration.
+- Import asks for confirmation and clearly states that extension enabled/disabled
+  states will not be changed.
+- Exported assignments for extensions not currently installed are preserved.
+- Raw configuration objects containing categories and assignments can also be
+  imported, in addition to files exported by the switchboard.
+
+UI
+--
+- rounded button styling.
+- Visually separates the "extensions shown" counter in the toolbar.
+- Replaced the toolbar icon with a clearer three-switch design.
+- Moved Export and Import from the category-management area to the modal header.
+- Updated user-facing status terminology:
+  - "Active first" -> "Enabled first"
+  - "User-disabled first" -> "Disabled first"
+  - "Show Firefox-disabled" -> "Show unavailable"
+  - Summary now reports "enabled" and "unavailable"
+  - Category counts now use "unavailable" instead of "locked"
+- Fixed category-list overflow by constraining the category pane and giving the list its own vertical scrollbar.
+
+Storage
+-------
+- The live configuration remains stored in the Firefox profile preference:
+    extensionSwitchboard.config
+- Export/import provides portability without changing the live storage model.
 
 Upgrade
 -------
-Replace the existing profile file:
-
-  <Firefox profile>\chrome\ExtensionSwitchboard.uc.js
-
-with ExtensionSwitchboard-v0.4.0.uc.js.txt, removing only the final .txt
-suffix. Completely restart Firefox. No changes are required to firefox.cfg or
-autoconfig.js.
-
-Changes
--------
-- Apply buttons show the number of pending changes.
-- Added "Apply and reload tab".
-- Apply results list extensions enabled, disabled, and failed.
-- Failed changes remain pending and visibly marked for correction or retry.
-- Added one-level "Undo last apply" for successfully changed extensions.
-- A partial undo retains only failed undo entries so it can be retried.
-- New pending selections made after Apply are preserved when Undo runs.
-- Undo history lasts for the lifetime of the Firefox browser window and is not
-  persisted across a Firefox restart.
+Replace the existing profile/chrome/ExtensionSwitchboard.uc.js file with the
+this new version, then completely restart Firefox.

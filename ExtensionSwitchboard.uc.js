@@ -8,6 +8,7 @@
  * - Assigns each extension to exactly one user-defined category.
  * - Enables/disables an entire category while retaining individual control.
  * - Stores categories and assignments in the Firefox profile preferences.
+ * - Exports and imports category configuration as JSON.
  * - Summarizes each extension's current site-access scope.
  * - Reports batch-operation results, retains failed changes, and supports undo.
  * - Can reload the current tab after applying extension changes.
@@ -16,13 +17,15 @@
 (() => {
     "use strict";
 
-    const VERSION = "0.4.0";
+    const VERSION = "0.5.1";
     const WIDGET_ID = "extension-switchboard-button";
     const PANEL_ID = "extension-switchboard-panel";
     const STYLE_ID = "extension-switchboard-style";
     const HTML_NS = "http://www.w3.org/1999/xhtml";
     const CONFIG_PREF = "extensionSwitchboard.config";
     const UNCATEGORIZED_ID = "__uncategorized__";
+    const EXPORT_FORMAT = "extension-switchboard-config";
+    const EXPORT_VERSION = 1;
 
     if (
         window.ExtensionSwitchboard?.version === VERSION ||
@@ -151,7 +154,7 @@
         style.id = STYLE_ID;
         style.textContent = `
             #${WIDGET_ID} {
-                list-style-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='context-stroke' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='M2 4h12M2 8h12M2 12h12'/%3E%3C/g%3E%3Cg fill='context-fill'%3E%3Ccircle cx='5' cy='4' r='2'/%3E%3Ccircle cx='11' cy='8' r='2'/%3E%3Ccircle cx='7' cy='12' r='2'/%3E%3C/g%3E%3C/svg%3E");
+                list-style-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='context-stroke' stroke-width='1.25'%3E%3Crect x='1.75' y='2.25' width='12.5' height='3.5' rx='1.75'/%3E%3Crect x='1.75' y='6.25' width='12.5' height='3.5' rx='1.75'/%3E%3Crect x='1.75' y='10.25' width='12.5' height='3.5' rx='1.75'/%3E%3C/g%3E%3Cg fill='context-fill'%3E%3Ccircle cx='4' cy='4' r='1.25'/%3E%3Ccircle cx='12' cy='8' r='1.25'/%3E%3Ccircle cx='6' cy='12' r='1.25'/%3E%3C/g%3E%3C/svg%3E");
                 -moz-context-properties: fill, stroke;
                 fill: currentColor;
                 stroke: currentColor;
@@ -192,6 +195,14 @@
                 align-items: flex-start;
                 justify-content: space-between;
             }
+            #${PANEL_ID} .sw-header-actions {
+                display: flex;
+                flex: 0 0 auto;
+                flex-wrap: wrap;
+                gap: 8px;
+                align-items: center;
+                justify-content: flex-end;
+            }
             #${PANEL_ID} .sw-feedback {
                 min-width: 0;
                 flex: 1 1 auto;
@@ -229,6 +240,15 @@
                 gap: 10px 12px;
                 align-items: center;
             }
+            #${PANEL_ID} .sw-shown {
+                height: -webkit-fill-available;
+                padding: 4px;
+                border: 1px solid var(--border-color-deemphasized);
+                border-radius: var(--border-radius-small);
+                background-color: #eee;
+                font-weight: 600;
+                line-height: 1.7;
+            }
             #${PANEL_ID} input[type="search"] {
                 flex: 1 1 320px;
                 min-height: 34px;
@@ -249,8 +269,10 @@
             }
             #${PANEL_ID} .sw-categories {
                 min-width: 0;
+                min-height: 0;
                 display: grid;
-                grid-template-rows: auto 1fr;
+                grid-template-rows: auto minmax(0, 1fr);
+                overflow: hidden;
                 border-right: 1px solid GrayText;
                 background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
             }
@@ -271,7 +293,9 @@
                 font-size: 11px;
             }
             #${PANEL_ID} .sw-category-list {
-                overflow: auto;
+                min-height: 0;
+                overflow-x: hidden;
+                overflow-y: auto;
                 padding-block: 5px;
             }
             #${PANEL_ID} .sw-category-row {
@@ -369,6 +393,7 @@
             #${PANEL_ID} button {
                 min-height: 32px;
                 padding: 5px 12px;
+                border-radius: var(--border-radius-small);
                 cursor: pointer;
             }
             #${PANEL_ID} button:disabled,
@@ -516,6 +541,31 @@
             className: "sw-summary sw-small",
             text: "Loading extensions…"
         });
+        const headerActions = createHtmlElement("div", {
+            className: "sw-header-actions"
+        });
+        const exportConfigElement = createHtmlElement("button", {
+            text: "Export",
+            attributes: {
+                type: "button",
+                title: "Export categories and extension assignments as JSON"
+            }
+        });
+        const importConfigElement = createHtmlElement("button", {
+            text: "Import",
+            attributes: {
+                type: "button",
+                title: "Replace categories and assignments from a JSON configuration file"
+            }
+        });
+        const importFileElement = createHtmlElement("input", {
+            attributes: {
+                type: "file",
+                accept: ".json,application/json",
+                hidden: "hidden",
+                "aria-hidden": "true"
+            }
+        });
         const closeElement = createHtmlElement("button", {
             className: "sw-close",
             text: "×",
@@ -527,7 +577,12 @@
         });
 
         headingGroup.append(heading, summaryElement);
-        header.append(headingGroup, closeElement);
+        headerActions.append(
+            exportConfigElement,
+            importConfigElement,
+            closeElement
+        );
+        header.append(headingGroup, headerActions, importFileElement);
 
         const toolbar = createHtmlElement("div", { className: "sw-toolbar" });
         const searchElement = createHtmlElement("input", {
@@ -549,8 +604,8 @@
 
         for (const [value, label] of [
             ["name", "Name"],
-            ["active-first", "Active first"],
-            ["user-disabled-first", "User-disabled first"]
+            ["active-first", "Enabled first"],
+            ["user-disabled-first", "Disabled first"]
         ]) {
             sortElement.append(createHtmlElement("option", {
                 text: label,
@@ -569,7 +624,7 @@
         showFirefoxDisabledElement.checked = true;
         showFirefoxDisabledLabel.append(
             showFirefoxDisabledElement,
-            createHtmlElement("span", { text: "Show Firefox-disabled" })
+            createHtmlElement("span", { text: "Show unavailable" })
         );
 
         const shownElement = createHtmlElement("div", {
@@ -796,6 +851,126 @@
             }
         };
 
+        const cloneConfig = source => ({
+            schemaVersion: source.schemaVersion ?? 1,
+            categories: source.categories.map(category => ({ ...category })),
+            assignments: { ...source.assignments }
+        });
+
+        const parseImportedConfig = rawText => {
+            let parsed;
+
+            try {
+                parsed = JSON.parse(rawText);
+            } catch {
+                throw new Error("The selected file does not contain valid JSON.");
+            }
+
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                throw new Error(
+                    "The selected file is not an Extension Switchboard configuration."
+                );
+            }
+
+            if (Object.hasOwn(parsed, "format")) {
+                if (parsed.format !== EXPORT_FORMAT) {
+                    throw new Error(
+                        "The selected JSON file uses an unrecognized configuration format."
+                    );
+                }
+
+                if (Number(parsed.exportVersion ?? 0) > EXPORT_VERSION) {
+                    throw new Error(
+                        "This configuration was created by a newer Extension Switchboard version."
+                    );
+                }
+
+                parsed = parsed.config;
+            }
+
+            if (
+                !parsed ||
+                typeof parsed !== "object" ||
+                Array.isArray(parsed) ||
+                !Array.isArray(parsed.categories) ||
+                !parsed.assignments ||
+                typeof parsed.assignments !== "object" ||
+                Array.isArray(parsed.assignments)
+            ) {
+                throw new Error(
+                    "The selected JSON file does not contain categories and assignments."
+                );
+            }
+
+            if (Number(parsed.schemaVersion ?? 1) > 1) {
+                throw new Error(
+                    "This configuration schema is newer than the installed switchboard supports."
+                );
+            }
+
+            const sanitized = sanitizeConfig(parsed);
+            const importedCategoryCount = parsed.categories.length;
+            const importedAssignmentCount = Object.keys(
+                parsed.assignments
+            ).length;
+
+            if (
+                sanitized.categories.length !== importedCategoryCount ||
+                Object.keys(sanitized.assignments).length !==
+                    importedAssignmentCount
+            ) {
+                throw new Error(
+                    "The configuration contains invalid, duplicate, or orphaned category data."
+                );
+            }
+
+            return sanitized;
+        };
+
+        const exportConfiguration = () => {
+            const exportedAt = new Date();
+            const datePart = [
+                exportedAt.getFullYear(),
+                String(exportedAt.getMonth() + 1).padStart(2, "0"),
+                String(exportedAt.getDate()).padStart(2, "0")
+            ].join("-");
+            const payload = {
+                format: EXPORT_FORMAT,
+                exportVersion: EXPORT_VERSION,
+                exportedAt: exportedAt.toISOString(),
+                config: cloneConfig(config)
+            };
+            const blob = new Blob(
+                [`${JSON.stringify(payload, null, 2)}\n`],
+                { type: "application/json" }
+            );
+            const url = URL.createObjectURL(blob);
+            const anchor = createHtmlElement("a", {
+                attributes: {
+                    href: url,
+                    download: `ExtensionSwitchboard-${datePart}.json`,
+                    hidden: "hidden"
+                }
+            });
+
+            document.documentElement.append(anchor);
+            anchor.click();
+
+            window.setTimeout(() => {
+                URL.revokeObjectURL(url);
+                anchor.remove();
+            }, 0);
+
+            const assignmentCount = Object.keys(config.assignments).length;
+            keepMessage = true;
+            messageElement.textContent =
+                `Exported ${config.categories.length} user categor${
+                    config.categories.length === 1 ? "y" : "ies"
+                } and ${assignmentCount} assignment${
+                    assignmentCount === 1 ? "" : "s"
+                }.`;
+        };
+
         const getSiteAccess = addon => {
             const permissionSource = addon.userPermissions ??
                 addon.installPermissions ?? null;
@@ -851,7 +1026,7 @@
             return {
                 key: "no-site-access",
                 label: "No site access",
-                title: "This extension does not have persistent or active-tab access to website content."
+                title: "This extension does not have persistent or on-demand access to website content."
             };
         };
 
@@ -872,6 +1047,8 @@
             renameCategoryElement.disabled = busy || !editable;
             deleteCategoryElement.disabled = busy || !editable;
             addCategoryElement.disabled = busy;
+            exportConfigElement.disabled = busy;
+            importConfigElement.disabled = busy;
         };
 
         const updateCounts = () => {
@@ -885,9 +1062,9 @@
             const undoCount = lastApplySnapshot?.entries?.length ?? 0;
 
             summaryElement.textContent =
-                `${rows.length} extensions · ${active} active · ` +
+                `${rows.length} extensions · ${active} enabled · ` +
                 `${config.categories.length + 1} categories · ` +
-                `${firefoxDisabled} Firefox-disabled`;
+                `${firefoxDisabled} unavailable`;
             shownElement.textContent = `${visible} shown`;
 
             applyElement.disabled = busy || changed === 0;
@@ -1035,7 +1212,7 @@ Last operation failed: ${row.lastError}`
 
                 const locked = members.length - toggleableMembers.length;
                 control.count.textContent = locked
-                    ? `${enabled}/${toggleableMembers.length} · ${locked} locked`
+                    ? `${enabled}/${toggleableMembers.length} · ${locked} unavailable`
                     : `${enabled}/${toggleableMembers.length}`;
 
                 control.element.classList.toggle(
@@ -1458,6 +1635,82 @@ Last operation failed: ${row.lastError}`
             keepMessage = true;
             messageElement.textContent =
                 `Deleted “${category.name}”; its extensions are now Uncategorized.`;
+        });
+
+        exportConfigElement.addEventListener("click", () => {
+            try {
+                exportConfiguration();
+            } catch (error) {
+                reportError(error);
+                keepMessage = true;
+                messageElement.textContent =
+                    "Configuration export failed. See Browser Console.";
+            }
+        });
+
+        importConfigElement.addEventListener("click", () => {
+            importFileElement.click();
+        });
+
+        importFileElement.addEventListener("change", async () => {
+            const file = importFileElement.files?.[0] ?? null;
+            importFileElement.value = "";
+            if (!file) return;
+
+            let importedConfig;
+
+            try {
+                importedConfig = parseImportedConfig(await file.text());
+            } catch (error) {
+                reportError(error);
+                showAlert(
+                    error instanceof Error
+                        ? error.message
+                        : "The configuration could not be imported."
+                );
+                return;
+            }
+
+            const categoryCount = importedConfig.categories.length;
+            const assignmentCount = Object.keys(
+                importedConfig.assignments
+            ).length;
+            const confirmed = confirmAction(
+                "Import configuration",
+                "Replace the current categories and assignments with " +
+                `the configuration from “${file.name}”?\n\n` +
+                `${categoryCount} user categor${
+                    categoryCount === 1 ? "y" : "ies"
+                } and ${assignmentCount} extension assignment${
+                    assignmentCount === 1 ? "" : "s"
+                } will be imported. Extension enabled/disabled states will not change.`
+            );
+            if (!confirmed) return;
+
+            const previousConfig = cloneConfig(config);
+            config.schemaVersion = importedConfig.schemaVersion;
+            config.categories = importedConfig.categories;
+            config.assignments = importedConfig.assignments;
+
+            if (!persistConfig()) {
+                config.schemaVersion = previousConfig.schemaVersion;
+                config.categories = previousConfig.categories;
+                config.assignments = previousConfig.assignments;
+                return;
+            }
+
+            selectedCategoryId = null;
+            clearOperationResults();
+            for (const row of rows) rebuildCategorySelect(row);
+            rebuildCategoryList();
+            renderRows();
+            keepMessage = true;
+            messageElement.textContent =
+                `Imported ${categoryCount} user categor${
+                    categoryCount === 1 ? "y" : "ies"
+                } and ${assignmentCount} assignment${
+                    assignmentCount === 1 ? "" : "s"
+                }. Extension states were left unchanged.`;
         });
 
         searchElement.addEventListener("input", renderRows);
