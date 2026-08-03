@@ -1,38 +1,54 @@
-Extension Switchboard v0.5.0
+Extension Switchboard v0.6.0
 ============================
 
-New
----
-- Export categories and extension assignments as a readable JSON file.
-- Import a previously exported configuration.
-- Import validates the file before changing the saved configuration.
-- Import asks for confirmation and clearly states that extension enabled/disabled
-  states will not be changed.
-- Exported assignments for extensions not currently installed are preserved.
-- Raw configuration objects containing categories and assignments can also be
-  imported, in addition to files exported by the switchboard.
+Internal architecture and maintainability refactor based on v0.5.0.
+The user interface, configuration preference, import/export format, and
+category schema remain compatible.
 
-UI
---
-- rounded button styling.
-- Visually separates the "extensions shown" counter in the toolbar.
-- Replaced the toolbar icon with a clearer three-switch design.
-- Moved Export and Import from the category-management area to the modal header.
-- Updated user-facing status terminology:
-  - "Active first" -> "Enabled first"
-  - "User-disabled first" -> "Disabled first"
-  - "Show Firefox-disabled" -> "Show unavailable"
-  - Summary now reports "enabled" and "unavailable"
-  - Category counts now use "unavailable" instead of "locked"
-- Fixed category-list overflow by constraining the category pane and giving the list its own vertical scrollbar.
+Architecture
+------------
+- FirefoxCompat centralizes Firefox-only APIs and compatibility fallbacks.
+- ConfigStore owns preference persistence, sanitization, cloning, and
+  import/export validation.
+- CategoryManager owns category validation, CRUD, and one-category-per-
+  extension assignment rules.
+- ExtensionService owns extension enumeration, permission checks, site-access
+  classification, and enable/disable operations.
+- SwitchboardPanel owns DOM construction, rendering, events, and user feedback.
+- SwitchboardController owns startup, toolbar registration, panel lifetime,
+  and the one-level undo snapshot.
 
-Storage
+Cleanup
 -------
-- The live configuration remains stored in the Firefox profile preference:
-    extensionSwitchboard.config
-- Export/import provides portability without changing the live storage model.
+- Consolidated element creation into shared DOM helpers.
+- Moved the complete stylesheet into one versioned style constant and manager.
+- Removed the previous monolithic open() closure and separated responsibilities.
+- Consolidated configuration rollback behavior for category and import changes.
+- Consolidated extension state-changing validation and post-operation checks.
+
+Firefox compatibility retained
+------------------------------
+- Uses window.Services?.prompt with window.prompt/alert/confirm fallbacks.
+- Uses ownerDocument.defaultView to resolve the toolbar button's browser window.
+- Retains the working AddonManager and CustomizableUI module import paths.
+- Continues creating XHTML elements with createElementNS rather than innerHTML.
+
+Compatibility
+-------------
+- Existing extensionSwitchboard.config data is used without migration.
+- Existing exported JSON files remain importable.
+- No changes are required to firefox.cfg or autoconfig.js.
+
+Validation performed
+--------------------
+- JavaScript syntax check.
+- Mocked Firefox startup and toolbar registration.
+- Mocked panel construction and extension enumeration.
+- Mocked category creation and preference persistence.
+- Mocked extension Apply and Undo flows.
 
 Upgrade
 -------
 Replace the existing profile/chrome/ExtensionSwitchboard.uc.js file with the
-this new version, then completely restart Firefox.
+contents of ExtensionSwitchboard-v0.6.0.uc.js.txt, removing only the final
+.txt suffix, then completely restart Firefox.

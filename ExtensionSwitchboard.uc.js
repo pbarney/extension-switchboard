@@ -2,164 +2,175 @@
  * Extension Switchboard
  * Persistent Firefox chrome script loaded through AutoConfig.
  *
- * Features:
- * - Enumerates installed user extensions dynamically.
- * - Enables/disables individual extensions in batches.
- * - Assigns each extension to exactly one user-defined category.
- * - Enables/disables an entire category while retaining individual control.
- * - Stores categories and assignments in the Firefox profile preferences.
- * - Exports and imports category configuration as JSON.
- * - Summarizes each extension's current site-access scope.
- * - Reports batch-operation results, retains failed changes, and supports undo.
- * - Can reload the current tab after applying extension changes.
+ * Architecture:
+ * - FirefoxCompat: Firefox-specific APIs and compatibility fallbacks.
+ * - ConfigStore: preference persistence and import/export validation.
+ * - CategoryManager: category rules and extension assignments.
+ * - ExtensionService: installed-extension discovery and state changes.
+ * - SwitchboardPanel: DOM construction, rendering, and user interaction.
  */
 
 (() => {
     "use strict";
 
-    const VERSION = "0.5.1";
-    const WIDGET_ID = "extension-switchboard-button";
-    const PANEL_ID = "extension-switchboard-panel";
-    const STYLE_ID = "extension-switchboard-style";
-    const HTML_NS = "http://www.w3.org/1999/xhtml";
-    const CONFIG_PREF = "extensionSwitchboard.config";
-    const UNCATEGORIZED_ID = "__uncategorized__";
-    const EXPORT_FORMAT = "extension-switchboard-config";
-    const EXPORT_VERSION = 1;
+    const APP = Object.freeze({
+        VERSION: "0.6.1",
+        WIDGET_ID: "extension-switchboard-button",
+        PANEL_ID: "extension-switchboard-panel",
+        STYLE_ID: "extension-switchboard-style",
+        HTML_NS: "http://www.w3.org/1999/xhtml",
+        CONFIG_PREF: "extensionSwitchboard.config",
+        CONFIG_SCHEMA_VERSION: 1,
+        UNCATEGORIZED_ID: "__uncategorized__",
+        EXPORT_FORMAT: "extension-switchboard-config",
+        EXPORT_VERSION: 1
+    });
 
-    if (
-        window.ExtensionSwitchboard?.version === VERSION ||
-        document.documentElement.getAttribute("windowtype") !== "navigator:browser"
-    ) {
+    const FALLBACK_EXTENSION_ICON =
+        "chrome://mozapps/skin/extensions/extensionGeneric.svg";
+
+    if (document.documentElement.getAttribute("windowtype") !== "navigator:browser") {
         return;
     }
 
-    const { classes: Cc, interfaces: Ci } = Components;
+    if (window.ExtensionSwitchboard?.version === APP.VERSION) {
+        return;
+    }
 
-    const { AddonManager } = ChromeUtils.importESModule(
-        "resource://gre/modules/AddonManager.sys.mjs"
-    );
+    try {
+        window.ExtensionSwitchboard?.destroy?.();
+    } catch {
+        // A previous version may not support clean hot replacement.
+    }
 
-    const CustomizableUI = window.CustomizableUI ??
-        ChromeUtils.importESModule(
-            "moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs"
-        ).CustomizableUI;
+    const FirefoxCompat = (() => {
+        const { classes: Cc, interfaces: Ci } = Components;
 
-    const preferences = Cc["@mozilla.org/preferences-service;1"]
-        .getService(Ci.nsIPrefBranch);
+        const AddonManager = ChromeUtils.importESModule(
+            "resource://gre/modules/AddonManager.sys.mjs"
+        ).AddonManager;
 
-    const promptService = window.Services?.prompt ?? null;
+        const CustomizableUI = window.CustomizableUI ??
+            ChromeUtils.importESModule(
+                "moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs"
+            ).CustomizableUI;
 
-    const reportError = error => {
-        const message = error instanceof Error
-            ? `${error.name}: ${error.message}\n${error.stack ?? ""}`
-            : String(error);
+        const preferences = Cc["@mozilla.org/preferences-service;1"]
+            .getService(Ci.nsIPrefBranch);
 
-        try {
-            Components.utils.reportError(`Extension Switchboard: ${message}`);
-        } catch {
-            console.error("Extension Switchboard:", error);
-        }
-    };
+        // This path is intentionally retained for current Firefox builds.
+        // Do not replace it with the obsolete XPCOM prompt-service lookup.
+        const promptService = window.Services?.prompt ?? null;
 
-    const createDefaultConfig = () => ({
-        schemaVersion: 1,
-        categories: [],
-        assignments: {}
-    });
+        const reportError = error => {
+            const message = error instanceof Error
+                ? `${error.name}: ${error.message}\n${error.stack ?? ""}`
+                : String(error);
 
-    const normalizeCategoryName = name => name.trim().toLocaleLowerCase();
+            try {
+                Components.utils.reportError(`Extension Switchboard: ${message}`);
+            } catch {
+                console.error("Extension Switchboard:", error);
+            }
+        };
 
-    const sanitizeConfig = value => {
-        const sanitized = createDefaultConfig();
-        const categoryIds = new Set();
-        const categoryNames = new Set();
+        const promptText = (title, message, initialValue = "") => {
+            if (promptService?.prompt) {
+                const input = { value: initialValue };
+                const accepted = promptService.prompt(
+                    window,
+                    title,
+                    message,
+                    input,
+                    null,
+                    {}
+                );
 
-        if (!value || typeof value !== "object") {
-            return sanitized;
-        }
-
-        for (const candidate of Array.isArray(value.categories)
-            ? value.categories
-            : []) {
-            const id = typeof candidate?.id === "string"
-                ? candidate.id.trim()
-                : "";
-            const name = typeof candidate?.name === "string"
-                ? candidate.name.trim()
-                : "";
-            const normalizedName = normalizeCategoryName(name);
-
-            if (
-                !id ||
-                !name ||
-                id === UNCATEGORIZED_ID ||
-                categoryIds.has(id) ||
-                categoryNames.has(normalizedName)
-            ) {
-                continue;
+                return accepted ? input.value.trim() : null;
             }
 
-            categoryIds.add(id);
-            categoryNames.add(normalizedName);
-            sanitized.categories.push({ id, name });
-        }
+            const value = window.prompt(message, initialValue);
+            return value === null ? null : value.trim();
+        };
 
-        if (value.assignments && typeof value.assignments === "object") {
-            for (const [extensionId, categoryId] of Object.entries(
-                value.assignments
-            )) {
-                if (
-                    typeof extensionId === "string" &&
-                    typeof categoryId === "string" &&
-                    categoryIds.has(categoryId)
-                ) {
-                    sanitized.assignments[extensionId] = categoryId;
+        const alert = message => {
+            if (promptService?.alert) {
+                promptService.alert(window, "Extension Switchboard", message);
+                return;
+            }
+
+            window.alert(message);
+        };
+
+        const confirm = (title, message) => {
+            if (promptService?.confirm) {
+                return promptService.confirm(window, title, message);
+            }
+
+            return window.confirm(message);
+        };
+
+        return {
+            AddonManager,
+            CustomizableUI,
+            preferences,
+            reportError,
+            promptText,
+            alert,
+            confirm
+        };
+    })();
+
+    const Dom = Object.freeze({
+        create(tagName, options = {}) {
+            const element = document.createElementNS(APP.HTML_NS, tagName);
+
+            if (options.id) element.id = options.id;
+            if (options.className) element.className = options.className;
+            if (options.text !== undefined) element.textContent = options.text;
+
+            for (const [name, value] of Object.entries(options.attributes ?? {})) {
+                if (value !== null && value !== undefined && value !== false) {
+                    element.setAttribute(name, value === true ? "" : String(value));
                 }
             }
+
+            Object.assign(element, options.properties ?? {});
+
+            if (options.children?.length) {
+                element.append(...options.children.filter(Boolean));
+            }
+
+            return element;
+        },
+
+        button(text, options = {}) {
+            return this.create("button", {
+                ...options,
+                text,
+                attributes: {
+                    type: "button",
+                    ...(options.attributes ?? {})
+                }
+            });
+        },
+
+        option(value, text) {
+            return this.create("option", {
+                text,
+                attributes: { value }
+            });
         }
+    });
 
-        return sanitized;
-    };
-
-    const loadConfig = () => {
-        try {
-            const raw = preferences.getStringPref(CONFIG_PREF, "");
-            if (!raw) return createDefaultConfig();
-            return sanitizeConfig(JSON.parse(raw));
-        } catch (error) {
-            reportError(error);
-            return createDefaultConfig();
-        }
-    };
-
-    const saveConfig = config => {
-        preferences.setStringPref(CONFIG_PREF, JSON.stringify(config));
-    };
-
-    const makeCategoryId = () => {
-        if (typeof window.crypto?.randomUUID === "function") {
-            return `category-${window.crypto.randomUUID()}`;
-        }
-
-        return `category-${Date.now()}-${Math.random()
-            .toString(36)
-            .slice(2)}`;
-    };
-
-    const ensureStyle = () => {
-        if (document.getElementById(STYLE_ID)) return;
-
-        const style = document.createElementNS(HTML_NS, "style");
-        style.id = STYLE_ID;
-        style.textContent = `
-            #${WIDGET_ID} {
+    const STYLE_TEXT = `
+            #${APP.WIDGET_ID} {
                 list-style-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='context-stroke' stroke-width='1.25'%3E%3Crect x='1.75' y='2.25' width='12.5' height='3.5' rx='1.75'/%3E%3Crect x='1.75' y='6.25' width='12.5' height='3.5' rx='1.75'/%3E%3Crect x='1.75' y='10.25' width='12.5' height='3.5' rx='1.75'/%3E%3C/g%3E%3Cg fill='context-fill'%3E%3Ccircle cx='4' cy='4' r='1.25'/%3E%3Ccircle cx='12' cy='8' r='1.25'/%3E%3Ccircle cx='6' cy='12' r='1.25'/%3E%3C/g%3E%3C/svg%3E");
                 -moz-context-properties: fill, stroke;
                 fill: currentColor;
                 stroke: currentColor;
             }
-            #${PANEL_ID} {
+            #${APP.PANEL_ID} {
                 position: fixed;
                 inset: 0;
                 z-index: 2147483647;
@@ -169,8 +180,8 @@
                 color-scheme: light dark;
                 font: message-box;
             }
-            #${PANEL_ID} * { box-sizing: border-box; }
-            #${PANEL_ID} .sw-panel {
+            #${APP.PANEL_ID} * { box-sizing: border-box; }
+            #${APP.PANEL_ID} .sw-panel {
                 width: min(980px, calc(100vw - 40px));
                 height: min(820px, calc(100vh - 40px));
                 display: grid;
@@ -182,20 +193,20 @@
                 color: CanvasText;
                 box-shadow: 0 18px 60px rgb(0 0 0 / 45%);
             }
-            #${PANEL_ID} .sw-header,
-            #${PANEL_ID} .sw-toolbar,
-            #${PANEL_ID} .sw-footer { padding: 12px 14px; }
-            #${PANEL_ID} .sw-header,
-            #${PANEL_ID} .sw-toolbar { border-bottom: 1px solid GrayText; }
-            #${PANEL_ID} .sw-footer { border-top: 1px solid GrayText; }
-            #${PANEL_ID} .sw-header,
-            #${PANEL_ID} .sw-footer {
+            #${APP.PANEL_ID} .sw-header,
+            #${APP.PANEL_ID} .sw-toolbar,
+            #${APP.PANEL_ID} .sw-footer { padding: 12px 14px; }
+            #${APP.PANEL_ID} .sw-header,
+            #${APP.PANEL_ID} .sw-toolbar { border-bottom: 1px solid GrayText; }
+            #${APP.PANEL_ID} .sw-footer { border-top: 1px solid GrayText; }
+            #${APP.PANEL_ID} .sw-header,
+            #${APP.PANEL_ID} .sw-footer {
                 display: flex;
                 gap: 12px;
                 align-items: flex-start;
                 justify-content: space-between;
             }
-            #${PANEL_ID} .sw-header-actions {
+            #${APP.PANEL_ID} .sw-header-actions {
                 display: flex;
                 flex: 0 0 auto;
                 flex-wrap: wrap;
@@ -203,44 +214,44 @@
                 align-items: center;
                 justify-content: flex-end;
             }
-            #${PANEL_ID} .sw-feedback {
+            #${APP.PANEL_ID} .sw-feedback {
                 min-width: 0;
                 flex: 1 1 auto;
             }
-            #${PANEL_ID} .sw-results[hidden] { display: none; }
-            #${PANEL_ID} .sw-results {
+            #${APP.PANEL_ID} .sw-results[hidden] { display: none; }
+            #${APP.PANEL_ID} .sw-results {
                 max-height: 170px;
                 overflow: auto;
                 margin-top: 6px;
                 font-size: 11px;
             }
-            #${PANEL_ID} .sw-results summary {
+            #${APP.PANEL_ID} .sw-results summary {
                 cursor: pointer;
                 font-weight: 600;
             }
-            #${PANEL_ID} .sw-result-group { margin-top: 6px; }
-            #${PANEL_ID} .sw-result-title { font-weight: 600; }
-            #${PANEL_ID} .sw-result-list {
+            #${APP.PANEL_ID} .sw-result-group { margin-top: 6px; }
+            #${APP.PANEL_ID} .sw-result-title { font-weight: 600; }
+            #${APP.PANEL_ID} .sw-result-list {
                 margin: 2px 0 0 18px;
                 padding: 0;
             }
-            #${PANEL_ID} .sw-result-list li { margin-block: 2px; }
-            #${PANEL_ID} h1,
-            #${PANEL_ID} h2 { margin: 0; }
-            #${PANEL_ID} h1 { font-size: 18px; }
-            #${PANEL_ID} h2 { font-size: 14px; }
-            #${PANEL_ID} .sw-small {
+            #${APP.PANEL_ID} .sw-result-list li { margin-block: 2px; }
+            #${APP.PANEL_ID} h1,
+            #${APP.PANEL_ID} h2 { margin: 0; }
+            #${APP.PANEL_ID} h1 { font-size: 18px; }
+            #${APP.PANEL_ID} h2 { font-size: 14px; }
+            #${APP.PANEL_ID} .sw-small {
                 margin-top: 4px;
                 font-size: 12px;
                 opacity: .75;
             }
-            #${PANEL_ID} .sw-toolbar {
+            #${APP.PANEL_ID} .sw-toolbar {
                 display: flex;
                 flex-wrap: wrap;
                 gap: 10px 12px;
                 align-items: center;
             }
-            #${PANEL_ID} .sw-shown {
+            #${APP.PANEL_ID} .sw-shown {
                 height: -webkit-fill-available;
                 padding: 4px;
                 border: 1px solid var(--border-color-deemphasized);
@@ -249,25 +260,25 @@
                 font-weight: 600;
                 line-height: 1.7;
             }
-            #${PANEL_ID} input[type="search"] {
+            #${APP.PANEL_ID} input[type="search"] {
                 flex: 1 1 320px;
                 min-height: 34px;
                 padding: 6px 10px;
             }
-            #${PANEL_ID} .sw-control {
+            #${APP.PANEL_ID} .sw-control {
                 display: inline-flex;
                 gap: 6px;
                 align-items: center;
                 font-size: 12px;
                 white-space: nowrap;
             }
-            #${PANEL_ID} .sw-control select { min-height: 30px; }
-            #${PANEL_ID} .sw-main {
+            #${APP.PANEL_ID} .sw-control select { min-height: 30px; }
+            #${APP.PANEL_ID} .sw-main {
                 min-height: 0;
                 display: grid;
                 grid-template-columns: 250px minmax(0, 1fr);
             }
-            #${PANEL_ID} .sw-categories {
+            #${APP.PANEL_ID} .sw-categories {
                 min-width: 0;
                 min-height: 0;
                 display: grid;
@@ -276,29 +287,29 @@
                 border-right: 1px solid GrayText;
                 background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
             }
-            #${PANEL_ID} .sw-category-header {
+            #${APP.PANEL_ID} .sw-category-header {
                 display: grid;
                 gap: 8px;
                 padding: 12px;
                 border-bottom: 1px solid GrayText;
             }
-            #${PANEL_ID} .sw-category-actions {
+            #${APP.PANEL_ID} .sw-category-actions {
                 display: flex;
                 flex-wrap: wrap;
                 gap: 6px;
             }
-            #${PANEL_ID} .sw-category-actions button {
+            #${APP.PANEL_ID} .sw-category-actions button {
                 min-height: 28px;
                 padding: 3px 8px;
                 font-size: 11px;
             }
-            #${PANEL_ID} .sw-category-list {
+            #${APP.PANEL_ID} .sw-category-list {
                 min-height: 0;
                 overflow-x: hidden;
                 overflow-y: auto;
                 padding-block: 5px;
             }
-            #${PANEL_ID} .sw-category-row {
+            #${APP.PANEL_ID} .sw-category-row {
                 display: grid;
                 grid-template-columns: 24px minmax(0, 1fr) auto;
                 gap: 6px;
@@ -306,14 +317,14 @@
                 min-height: 38px;
                 padding: 4px 10px;
             }
-            #${PANEL_ID} .sw-category-row:hover,
-            #${PANEL_ID} .sw-category-row.selected {
+            #${APP.PANEL_ID} .sw-category-row:hover,
+            #${APP.PANEL_ID} .sw-category-row.selected {
                 background: color-mix(in srgb, AccentColor 13%, transparent);
             }
-            #${PANEL_ID} .sw-category-row.selected {
+            #${APP.PANEL_ID} .sw-category-row.selected {
                 box-shadow: inset 3px 0 AccentColor;
             }
-            #${PANEL_ID} .sw-category-name {
+            #${APP.PANEL_ID} .sw-category-name {
                 min-width: 0;
                 min-height: 28px;
                 overflow: hidden;
@@ -327,537 +338,232 @@
                 text-overflow: ellipsis;
                 white-space: nowrap;
             }
-            #${PANEL_ID} .sw-category-count {
+            #${APP.PANEL_ID} .sw-category-count {
                 font-size: 10px;
                 opacity: .68;
                 white-space: nowrap;
             }
-            #${PANEL_ID} .sw-all-row {
+            #${APP.PANEL_ID} .sw-all-row {
                 grid-template-columns: 24px minmax(0, 1fr) auto;
             }
-            #${PANEL_ID} .sw-all-row .sw-all-spacer {
+            #${APP.PANEL_ID} .sw-all-row .sw-all-spacer {
                 width: 16px;
             }
-            #${PANEL_ID} .sw-extension-area {
+            #${APP.PANEL_ID} .sw-extension-area {
                 min-width: 0;
                 min-height: 0;
                 display: grid;
                 grid-template-rows: 1fr;
             }
-            #${PANEL_ID} .sw-list { overflow: auto; padding-block: 5px; }
-            #${PANEL_ID} .sw-row {
+            #${APP.PANEL_ID} .sw-list { overflow: auto; padding-block: 5px; }
+            #${APP.PANEL_ID} .sw-row {
                 display: grid;
-                grid-template-columns: 28px minmax(0, 1fr) 165px;
+                grid-template-columns: 28px 32px minmax(0, 1fr) 165px;
                 gap: 8px;
                 align-items: center;
                 min-height: 54px;
                 padding: 6px 14px;
             }
-            #${PANEL_ID} .sw-row[hidden] { display: none; }
-            #${PANEL_ID} .sw-row:hover {
+            #${APP.PANEL_ID} .sw-icon {
+                width: 32px;
+                height: 32px;
+                object-fit: contain;
+                -moz-context-properties: fill, stroke;
+                fill: currentColor;
+                stroke: currentColor;
+            }
+            #${APP.PANEL_ID} .sw-row[hidden] { display: none; }
+            #${APP.PANEL_ID} .sw-row:hover {
                 background: color-mix(in srgb, AccentColor 10%, transparent);
             }
-            #${PANEL_ID} .sw-row.changed {
+            #${APP.PANEL_ID} .sw-row.changed {
                 background: color-mix(in srgb, AccentColor 17%, transparent);
             }
-            #${PANEL_ID} .sw-row.apply-failed .sw-scope {
+            #${APP.PANEL_ID} .sw-row.apply-failed .sw-scope {
                 font-weight: 600;
                 opacity: .9;
             }
-            #${PANEL_ID} .sw-name {
+            #${APP.PANEL_ID} .sw-name {
                 overflow: hidden;
                 font-weight: 600;
                 text-overflow: ellipsis;
                 white-space: nowrap;
             }
-            #${PANEL_ID} .sw-scope {
+            #${APP.PANEL_ID} .sw-scope {
                 overflow: hidden;
                 margin-top: 2px;
                 font-size: 11px;
-                opacity: .68;
+                color: var(--text-color-deemphasized);
                 text-overflow: ellipsis;
                 white-space: nowrap;
             }
-            #${PANEL_ID} .sw-category-select {
+            #${APP.PANEL_ID} .sw-scope strong {
+                font-weight: 600;
+            }
+            #${APP.PANEL_ID} .sw-category-select {
                 width: 100%;
                 min-width: 0;
                 min-height: 30px;
             }
-            #${PANEL_ID} .sw-actions {
+            #${APP.PANEL_ID} .sw-actions {
                 display: flex;
                 flex: 0 0 auto;
                 flex-wrap: wrap;
                 gap: 8px;
                 justify-content: flex-end;
             }
-            #${PANEL_ID} button {
+            #${APP.PANEL_ID} button {
                 min-height: 32px;
                 padding: 5px 12px;
+                border-width: 1px;
                 border-radius: var(--border-radius-small);
                 cursor: pointer;
             }
-            #${PANEL_ID} button:disabled,
-            #${PANEL_ID} input:disabled,
-            #${PANEL_ID} select:disabled {
+            #${APP.PANEL_ID} button:disabled,
+            #${APP.PANEL_ID} input:disabled,
+            #${APP.PANEL_ID} select:disabled {
                 cursor: not-allowed;
                 opacity: .55;
             }
-            #${PANEL_ID} .sw-close {
+            #${APP.PANEL_ID} .sw-close {
                 min-width: 32px;
                 padding-inline: 8px;
                 font-size: 18px;
             }
             @media (max-width: 760px) {
-                #${PANEL_ID} .sw-panel {
+                #${APP.PANEL_ID} .sw-panel {
                     width: calc(100vw - 20px);
                     height: calc(100vh - 20px);
                 }
-                #${PANEL_ID} .sw-main {
+                #${APP.PANEL_ID} .sw-main {
                     grid-template-columns: 200px minmax(0, 1fr);
                 }
-                #${PANEL_ID} .sw-row {
-                    grid-template-columns: 28px minmax(0, 1fr) 130px;
+                #${APP.PANEL_ID} .sw-row {
+                    grid-template-columns: 28px 28px minmax(0, 1fr) 130px;
+                }
+                #${APP.PANEL_ID} .sw-icon {
+                    width: 28px;
+                    height: 28px;
                 }
             }
-        `;
+`;
 
-        document.documentElement.append(style);
-    };
+    const StyleManager = Object.freeze({
+        ensure() {
+            const existing = document.getElementById(APP.STYLE_ID);
+            if (existing?.dataset.version === APP.VERSION) return;
+            existing?.remove();
 
-    const ensureWidget = () => {
-        const existingWidget = CustomizableUI.getWidget(WIDGET_ID);
-
-        if (existingWidget?.provider === CustomizableUI.PROVIDER_API) {
-            return;
-        }
-
-        CustomizableUI.createWidget({
-            id: WIDGET_ID,
-            type: "button",
-            defaultArea: CustomizableUI.AREA_NAVBAR,
-            removable: true,
-            label: "Extension Switchboard",
-            tooltiptext: "Enable or disable Firefox extensions",
-            onCommand(event) {
-                const win =
-                    event?.target?.ownerDocument?.defaultView ??
-                    event?.currentTarget?.ownerDocument?.defaultView ??
-                    event?.view;
-
-                if (!win?.ExtensionSwitchboard) {
-                    reportError(
-                        new Error(
-                            "Could not locate Extension Switchboard in the " +
-                            "browser window that received the command."
-                        )
-                    );
-                    return;
-                }
-
-                win.ExtensionSwitchboard.open().catch(reportError);
-            }
-        });
-    };
-
-    const createHtmlElement = (tagName, options = {}) => {
-        const element = document.createElementNS(HTML_NS, tagName);
-
-        if (options.className) element.className = options.className;
-        if (options.text !== undefined) element.textContent = options.text;
-
-        for (const [name, value] of Object.entries(options.attributes ?? {})) {
-            element.setAttribute(name, value);
-        }
-
-        return element;
-    };
-
-    const close = () => {
-        document.getElementById(PANEL_ID)?.remove();
-    };
-
-    const askForCategoryName = (title, prompt, initialValue = "") => {
-        if (promptService?.prompt) {
-            const input = { value: initialValue };
-            const accepted = promptService.prompt(
-                window,
-                title,
-                prompt,
-                input,
-                null,
-                {}
-            );
-
-            return accepted ? input.value.trim() : null;
-        }
-
-        const value = window.prompt(prompt, initialValue);
-        return value === null ? null : value.trim();
-    };
-
-    const showAlert = message => {
-        if (promptService?.alert) {
-            promptService.alert(window, "Extension Switchboard", message);
-            return;
-        }
-
-        window.alert(message);
-    };
-
-    const confirmAction = (title, message) => {
-        if (promptService?.confirm) {
-            return promptService.confirm(window, title, message);
-        }
-
-        return window.confirm(message);
-    };
-
-    // One level of undo is retained for the lifetime of this browser window.
-    let lastApplySnapshot = null;
-
-    const open = async () => {
-        ensureStyle();
-        close();
-
-        const config = loadConfig();
-        let selectedCategoryId = null;
-
-        const overlay = createHtmlElement("div");
-        overlay.id = PANEL_ID;
-
-        const panel = createHtmlElement("div", {
-            className: "sw-panel",
-            attributes: {
-                role: "dialog",
-                "aria-label": "Extension Switchboard",
-                "aria-modal": "true"
-            }
-        });
-
-        const header = createHtmlElement("div", { className: "sw-header" });
-        const headingGroup = createHtmlElement("div");
-        const heading = createHtmlElement("h1", { text: "Extension Switchboard" });
-        const summaryElement = createHtmlElement("div", {
-            className: "sw-summary sw-small",
-            text: "Loading extensions…"
-        });
-        const headerActions = createHtmlElement("div", {
-            className: "sw-header-actions"
-        });
-        const exportConfigElement = createHtmlElement("button", {
-            text: "Export",
-            attributes: {
-                type: "button",
-                title: "Export categories and extension assignments as JSON"
-            }
-        });
-        const importConfigElement = createHtmlElement("button", {
-            text: "Import",
-            attributes: {
-                type: "button",
-                title: "Replace categories and assignments from a JSON configuration file"
-            }
-        });
-        const importFileElement = createHtmlElement("input", {
-            attributes: {
-                type: "file",
-                accept: ".json,application/json",
-                hidden: "hidden",
-                "aria-hidden": "true"
-            }
-        });
-        const closeElement = createHtmlElement("button", {
-            className: "sw-close",
-            text: "×",
-            attributes: {
-                type: "button",
-                title: "Close",
-                "aria-label": "Close"
-            }
-        });
-
-        headingGroup.append(heading, summaryElement);
-        headerActions.append(
-            exportConfigElement,
-            importConfigElement,
-            closeElement
-        );
-        header.append(headingGroup, headerActions, importFileElement);
-
-        const toolbar = createHtmlElement("div", { className: "sw-toolbar" });
-        const searchElement = createHtmlElement("input", {
-            className: "sw-search",
-            attributes: {
-                type: "search",
-                placeholder: "Filter by extension name, ID, or category…",
-                autocomplete: "off"
-            }
-        });
-
-        const sortLabel = createHtmlElement("label", { className: "sw-control" });
-        sortLabel.append(createHtmlElement("span", { text: "Sort:" }));
-
-        const sortElement = createHtmlElement("select", {
-            className: "sw-sort",
-            attributes: { "aria-label": "Sort extensions" }
-        });
-
-        for (const [value, label] of [
-            ["name", "Name"],
-            ["active-first", "Enabled first"],
-            ["user-disabled-first", "Disabled first"]
-        ]) {
-            sortElement.append(createHtmlElement("option", {
-                text: label,
-                attributes: { value }
-            }));
-        }
-        sortLabel.append(sortElement);
-
-        const showFirefoxDisabledLabel = createHtmlElement("label", {
-            className: "sw-control"
-        });
-        const showFirefoxDisabledElement = createHtmlElement("input", {
-            className: "sw-show-firefox-disabled",
-            attributes: { type: "checkbox" }
-        });
-        showFirefoxDisabledElement.checked = true;
-        showFirefoxDisabledLabel.append(
-            showFirefoxDisabledElement,
-            createHtmlElement("span", { text: "Show unavailable" })
-        );
-
-        const shownElement = createHtmlElement("div", {
-            className: "sw-shown sw-small"
-        });
-
-        toolbar.append(
-            searchElement,
-            sortLabel,
-            showFirefoxDisabledLabel,
-            shownElement
-        );
-
-        const main = createHtmlElement("div", { className: "sw-main" });
-
-        const categoriesArea = createHtmlElement("aside", {
-            className: "sw-categories"
-        });
-        const categoryHeader = createHtmlElement("div", {
-            className: "sw-category-header"
-        });
-        const categoryTitle = createHtmlElement("h2", { text: "Categories" });
-        const categoryHelp = createHtmlElement("div", {
-            className: "sw-small",
-            text: "Toggle a category, or click its name to filter."
-        });
-        const categoryActions = createHtmlElement("div", {
-            className: "sw-category-actions"
-        });
-        const addCategoryElement = createHtmlElement("button", {
-            text: "New",
-            attributes: { type: "button", title: "Create category" }
-        });
-        const renameCategoryElement = createHtmlElement("button", {
-            text: "Rename",
-            attributes: { type: "button", title: "Rename selected category" }
-        });
-        const deleteCategoryElement = createHtmlElement("button", {
-            text: "Delete",
-            attributes: { type: "button", title: "Delete selected category" }
-        });
-        categoryActions.append(
-            addCategoryElement,
-            renameCategoryElement,
-            deleteCategoryElement
-        );
-        categoryHeader.append(categoryTitle, categoryHelp, categoryActions);
-
-        const categoryListElement = createHtmlElement("div", {
-            className: "sw-category-list"
-        });
-        categoriesArea.append(categoryHeader, categoryListElement);
-
-        const extensionArea = createHtmlElement("section", {
-            className: "sw-extension-area"
-        });
-        const listElement = createHtmlElement("div", { className: "sw-list" });
-        extensionArea.append(listElement);
-
-        main.append(categoriesArea, extensionArea);
-
-        const footer = createHtmlElement("div", { className: "sw-footer" });
-        const feedbackElement = createHtmlElement("div", {
-            className: "sw-feedback"
-        });
-        const messageElement = createHtmlElement("div", {
-            className: "sw-message sw-small",
-            text: "No unapplied changes."
-        });
-        const resultsElement = createHtmlElement("details", {
-            className: "sw-results"
-        });
-        resultsElement.hidden = true;
-        const resultsSummaryElement = createHtmlElement("summary", {
-            text: "Operation details"
-        });
-        const resultsBodyElement = createHtmlElement("div", {
-            className: "sw-results-body"
-        });
-        resultsElement.append(resultsSummaryElement, resultsBodyElement);
-        feedbackElement.append(messageElement, resultsElement);
-
-        const actions = createHtmlElement("div", { className: "sw-actions" });
-        const resetElement = createHtmlElement("button", {
-            className: "sw-reset",
-            text: "Reset",
-            attributes: { type: "button" }
-        });
-        const undoElement = createHtmlElement("button", {
-            className: "sw-undo",
-            text: "Undo last apply",
-            attributes: {
-                type: "button",
-                title: "Restore the extension states from immediately before the last successful Apply operation"
-            }
-        });
-        undoElement.disabled = true;
-        const applyReloadElement = createHtmlElement("button", {
-            className: "sw-apply-reload",
-            text: "Apply and reload tab",
-            attributes: { type: "button" }
-        });
-        applyReloadElement.disabled = true;
-        const applyElement = createHtmlElement("button", {
-            className: "sw-apply",
-            text: "Apply changes",
-            attributes: { type: "button" }
-        });
-        applyElement.disabled = true;
-
-        actions.append(
-            resetElement,
-            undoElement,
-            applyReloadElement,
-            applyElement
-        );
-        footer.append(feedbackElement, actions);
-        panel.append(header, toolbar, main, footer);
-        overlay.append(panel);
-        document.documentElement.append(overlay);
-
-        let busy = false;
-        let keepMessage = false;
-        const rows = [];
-        const categoryControls = [];
-
-        const clearOperationResults = () => {
-            resultsElement.hidden = true;
-            resultsElement.open = false;
-            resultsBodyElement.replaceChildren();
-        };
-
-        const appendResultGroup = (title, entries, formatter = value => value) => {
-            if (!entries.length) return;
-
-            const group = createHtmlElement("div", {
-                className: "sw-result-group"
+            const style = Dom.create("style", {
+                id: APP.STYLE_ID,
+                text: STYLE_TEXT
             });
-            const heading = createHtmlElement("div", {
-                className: "sw-result-title",
-                text: `${title} (${entries.length})`
-            });
-            const list = createHtmlElement("ul", {
-                className: "sw-result-list"
-            });
+            style.dataset.version = APP.VERSION;
+            document.documentElement.append(style);
+        },
 
-            for (const entry of entries) {
-                list.append(createHtmlElement("li", {
-                    text: formatter(entry)
-                }));
-            }
+        remove() {
+            document.getElementById(APP.STYLE_ID)?.remove();
+        }
+    });
 
-            group.append(heading, list);
-            resultsBodyElement.append(group);
-        };
+    class ConfigStore {
+        constructor(preferences) {
+            this.preferences = preferences;
+        }
 
-        const showOperationResults = ({ enabled, disabled, failures }) => {
-            resultsBodyElement.replaceChildren();
-            appendResultGroup("Enabled", enabled);
-            appendResultGroup("Disabled", disabled);
-            appendResultGroup(
-                "Failed",
-                failures,
-                failure => `${failure.name}: ${failure.error}`
-            );
-
-            const total = enabled.length + disabled.length + failures.length;
-            resultsElement.hidden = total === 0;
-            resultsElement.open = failures.length > 0;
-            resultsSummaryElement.textContent = failures.length
-                ? `Operation details · ${failures.length} failed`
-                : "Operation details";
-        };
-
-        const categoryById = categoryId => {
-            if (categoryId === UNCATEGORIZED_ID) {
-                return {
-                    id: UNCATEGORIZED_ID,
-                    name: "Uncategorized",
-                    builtIn: true
-                };
-            }
-
-            const category = config.categories.find(
-                item => item.id === categoryId
-            );
-
-            return category ? { ...category, builtIn: false } : {
-                id: UNCATEGORIZED_ID,
-                name: "Uncategorized",
-                builtIn: true
+        createDefault() {
+            return {
+                schemaVersion: APP.CONFIG_SCHEMA_VERSION,
+                categories: [],
+                assignments: {}
             };
-        };
+        }
 
-        const categoriesForDisplay = () => [
-            {
-                id: UNCATEGORIZED_ID,
-                name: "Uncategorized",
-                builtIn: true
-            },
-            ...config.categories.map(category => ({
-                ...category,
-                builtIn: false
-            }))
-        ];
+        normalizeCategoryName(name) {
+            return name.trim().toLocaleLowerCase();
+        }
 
-        const assignedCategoryId = extensionId => {
-            const configuredId = config.assignments[extensionId];
-            return config.categories.some(category => category.id === configuredId)
-                ? configuredId
-                : UNCATEGORIZED_ID;
-        };
+        sanitize(value) {
+            const sanitized = this.createDefault();
+            const categoryIds = new Set();
+            const categoryNames = new Set();
 
-        const persistConfig = () => {
-            try {
-                saveConfig(config);
-                return true;
-            } catch (error) {
-                reportError(error);
-                messageElement.textContent =
-                    "Category configuration could not be saved. See Browser Console.";
-                keepMessage = true;
-                return false;
+            if (!value || typeof value !== "object") {
+                return sanitized;
             }
-        };
 
-        const cloneConfig = source => ({
-            schemaVersion: source.schemaVersion ?? 1,
-            categories: source.categories.map(category => ({ ...category })),
-            assignments: { ...source.assignments }
-        });
+            for (const candidate of Array.isArray(value.categories)
+                ? value.categories
+                : []) {
+                const id = typeof candidate?.id === "string"
+                    ? candidate.id.trim()
+                    : "";
+                const name = typeof candidate?.name === "string"
+                    ? candidate.name.trim()
+                    : "";
+                const normalizedName = this.normalizeCategoryName(name);
 
-        const parseImportedConfig = rawText => {
+                if (
+                    !id ||
+                    !name ||
+                    id === APP.UNCATEGORIZED_ID ||
+                    categoryIds.has(id) ||
+                    categoryNames.has(normalizedName)
+                ) {
+                    continue;
+                }
+
+                categoryIds.add(id);
+                categoryNames.add(normalizedName);
+                sanitized.categories.push({ id, name });
+            }
+
+            if (value.assignments && typeof value.assignments === "object") {
+                for (const [extensionId, categoryId] of Object.entries(
+                    value.assignments
+                )) {
+                    if (
+                        typeof extensionId === "string" &&
+                        typeof categoryId === "string" &&
+                        categoryIds.has(categoryId)
+                    ) {
+                        sanitized.assignments[extensionId] = categoryId;
+                    }
+                }
+            }
+
+            return sanitized;
+        }
+
+        clone(config) {
+            return {
+                schemaVersion: config.schemaVersion ?? APP.CONFIG_SCHEMA_VERSION,
+                categories: config.categories.map(category => ({ ...category })),
+                assignments: { ...config.assignments }
+            };
+        }
+
+        load() {
+            try {
+                const raw = this.preferences.getStringPref(APP.CONFIG_PREF, "");
+                return raw
+                    ? this.sanitize(JSON.parse(raw))
+                    : this.createDefault();
+            } catch (error) {
+                FirefoxCompat.reportError(error);
+                return this.createDefault();
+            }
+        }
+
+        save(config) {
+            this.preferences.setStringPref(
+                APP.CONFIG_PREF,
+                JSON.stringify(config)
+            );
+        }
+
+        parseImport(rawText) {
             let parsed;
 
             try {
@@ -873,13 +579,13 @@
             }
 
             if (Object.hasOwn(parsed, "format")) {
-                if (parsed.format !== EXPORT_FORMAT) {
+                if (parsed.format !== APP.EXPORT_FORMAT) {
                     throw new Error(
                         "The selected JSON file uses an unrecognized configuration format."
                     );
                 }
 
-                if (Number(parsed.exportVersion ?? 0) > EXPORT_VERSION) {
+                if (Number(parsed.exportVersion ?? 0) > APP.EXPORT_VERSION) {
                     throw new Error(
                         "This configuration was created by a newer Extension Switchboard version."
                     );
@@ -902,22 +608,22 @@
                 );
             }
 
-            if (Number(parsed.schemaVersion ?? 1) > 1) {
+            if (
+                Number(parsed.schemaVersion ?? APP.CONFIG_SCHEMA_VERSION) >
+                APP.CONFIG_SCHEMA_VERSION
+            ) {
                 throw new Error(
                     "This configuration schema is newer than the installed switchboard supports."
                 );
             }
 
-            const sanitized = sanitizeConfig(parsed);
+            const sanitized = this.sanitize(parsed);
             const importedCategoryCount = parsed.categories.length;
-            const importedAssignmentCount = Object.keys(
-                parsed.assignments
-            ).length;
+            const importedAssignmentCount = Object.keys(parsed.assignments).length;
 
             if (
                 sanitized.categories.length !== importedCategoryCount ||
-                Object.keys(sanitized.assignments).length !==
-                    importedAssignmentCount
+                Object.keys(sanitized.assignments).length !== importedAssignmentCount
             ) {
                 throw new Error(
                     "The configuration contains invalid, duplicate, or orphaned category data."
@@ -925,53 +631,199 @@
             }
 
             return sanitized;
-        };
+        }
 
-        const exportConfiguration = () => {
-            const exportedAt = new Date();
-            const datePart = [
-                exportedAt.getFullYear(),
-                String(exportedAt.getMonth() + 1).padStart(2, "0"),
-                String(exportedAt.getDate()).padStart(2, "0")
-            ].join("-");
-            const payload = {
-                format: EXPORT_FORMAT,
-                exportVersion: EXPORT_VERSION,
+        createExportPayload(config, exportedAt = new Date()) {
+            return {
+                format: APP.EXPORT_FORMAT,
+                exportVersion: APP.EXPORT_VERSION,
                 exportedAt: exportedAt.toISOString(),
-                config: cloneConfig(config)
+                config: this.clone(config)
             };
-            const blob = new Blob(
-                [`${JSON.stringify(payload, null, 2)}\n`],
-                { type: "application/json" }
+        }
+    }
+
+    class CategoryManager {
+        constructor(configStore, config) {
+            this.configStore = configStore;
+            this.config = config;
+        }
+
+        replaceConfig(config) {
+            this.config = config;
+        }
+
+        snapshot() {
+            return this.configStore.clone(this.config);
+        }
+
+        createId() {
+            if (typeof window.crypto?.randomUUID === "function") {
+                return `category-${window.crypto.randomUUID()}`;
+            }
+
+            return `category-${Date.now()}-${Math.random()
+                .toString(36)
+                .slice(2)}`;
+        }
+
+        uncategorized() {
+            return {
+                id: APP.UNCATEGORIZED_ID,
+                name: "Uncategorized",
+                builtIn: true
+            };
+        }
+
+        listForDisplay() {
+            return [
+                this.uncategorized(),
+                ...this.config.categories.map(category => ({
+                    ...category,
+                    builtIn: false
+                }))
+            ];
+        }
+
+        getById(categoryId) {
+            if (categoryId === APP.UNCATEGORIZED_ID) {
+                return this.uncategorized();
+            }
+
+            const category = this.config.categories.find(
+                item => item.id === categoryId
             );
-            const url = URL.createObjectURL(blob);
-            const anchor = createHtmlElement("a", {
-                attributes: {
-                    href: url,
-                    download: `ExtensionSwitchboard-${datePart}.json`,
-                    hidden: "hidden"
+
+            return category
+                ? { ...category, builtIn: false }
+                : this.uncategorized();
+        }
+
+        assignedId(extensionId) {
+            const configuredId = this.config.assignments[extensionId];
+            return this.config.categories.some(
+                category => category.id === configuredId
+            )
+                ? configuredId
+                : APP.UNCATEGORIZED_ID;
+        }
+
+        assign(extensionId, categoryId) {
+            if (categoryId === APP.UNCATEGORIZED_ID) {
+                delete this.config.assignments[extensionId];
+                return;
+            }
+
+            if (!this.config.categories.some(category => category.id === categoryId)) {
+                throw new Error("The selected category no longer exists.");
+            }
+
+            this.config.assignments[extensionId] = categoryId;
+        }
+
+        validateName(name, excludeId = null) {
+            if (!name) return "A category name cannot be empty.";
+            if (name.length > 80) {
+                return "Category names are limited to 80 characters.";
+            }
+
+            const normalized = this.configStore.normalizeCategoryName(name);
+            if (
+                normalized ===
+                    this.configStore.normalizeCategoryName("Uncategorized") ||
+                this.config.categories.some(
+                    category => category.id !== excludeId &&
+                        this.configStore.normalizeCategoryName(category.name) ===
+                            normalized
+                )
+            ) {
+                return "That category name is already in use.";
+            }
+
+            return null;
+        }
+
+        create(name) {
+            const error = this.validateName(name);
+            if (error) throw new Error(error);
+
+            const category = { id: this.createId(), name };
+            this.config.categories.push(category);
+            return category;
+        }
+
+        rename(categoryId, name) {
+            const category = this.config.categories.find(
+                item => item.id === categoryId
+            );
+            if (!category) throw new Error("The selected category no longer exists.");
+
+            const error = this.validateName(name, categoryId);
+            if (error) throw new Error(error);
+
+            category.name = name;
+            return category;
+        }
+
+        remove(categoryId) {
+            const categoryIndex = this.config.categories.findIndex(
+                item => item.id === categoryId
+            );
+            if (categoryIndex < 0) {
+                throw new Error("The selected category no longer exists.");
+            }
+
+            const [category] = this.config.categories.splice(categoryIndex, 1);
+
+            for (const [extensionId, assignedCategoryId] of Object.entries(
+                this.config.assignments
+            )) {
+                if (assignedCategoryId === categoryId) {
+                    delete this.config.assignments[extensionId];
                 }
-            });
+            }
 
-            document.documentElement.append(anchor);
-            anchor.click();
+            return category;
+        }
+    }
 
-            window.setTimeout(() => {
-                URL.revokeObjectURL(url);
-                anchor.remove();
-            }, 0);
+    class ExtensionService {
+        constructor(addonManager) {
+            this.addonManager = addonManager;
+        }
 
-            const assignmentCount = Object.keys(config.assignments).length;
-            keepMessage = true;
-            messageElement.textContent =
-                `Exported ${config.categories.length} user categor${
-                    config.categories.length === 1 ? "y" : "ies"
-                } and ${assignmentCount} assignment${
-                    assignmentCount === 1 ? "" : "s"
-                }.`;
-        };
+        async listUserExtensions() {
+            return (await this.addonManager.getAddonsByTypes(["extension"]))
+                .filter(addon => !addon.hidden && !addon.isSystem);
+        }
 
-        const getSiteAccess = addon => {
+        async getById(id) {
+            return this.addonManager.getAddonByID(id);
+        }
+
+        canToggle(addon) {
+            if (addon.appDisabled) return false;
+
+            const permission = addon.isActive
+                ? this.addonManager.PERM_CAN_DISABLE
+                : this.addonManager.PERM_CAN_ENABLE;
+
+            return Boolean(addon.permissions & permission);
+        }
+
+        getIconURL(addon, size = 32) {
+            try {
+                return this.addonManager.getPreferredIconURL(
+                    addon,
+                    size,
+                    window
+                ) ?? FALLBACK_EXTENSION_ICON;
+            } catch {
+                return FALLBACK_EXTENSION_ICON;
+            }
+        }
+
+        getSiteAccess(addon) {
             const permissionSource = addon.userPermissions ??
                 addon.installPermissions ?? null;
             const hasPermissionMetadata =
@@ -996,8 +848,7 @@
             const allSites =
                 originSet.has("<all_urls>") ||
                 originSet.has("*://*/*") ||
-                (originSet.has("http://*/*") &&
-                    originSet.has("https://*/*"));
+                (originSet.has("http://*/*") && originSet.has("https://*/*"));
 
             if (allSites) {
                 return {
@@ -1028,77 +879,702 @@
                 label: "No site access",
                 title: "This extension does not have persistent or on-demand access to website content."
             };
-        };
+        }
 
-        const canToggle = addon => {
-            if (addon.appDisabled) return false;
+        async setActive(id, desiredActive) {
+            const addon = await this.getById(id);
+            if (!addon) throw new Error("Extension is no longer installed.");
 
-            const permission = addon.isActive
-                ? AddonManager.PERM_CAN_DISABLE
-                : AddonManager.PERM_CAN_ENABLE;
+            const previousActive = addon.isActive;
 
-            return Boolean(addon.permissions & permission);
-        };
+            if (desiredActive !== previousActive) {
+                if (desiredActive) {
+                    if (
+                        addon.appDisabled ||
+                        !(addon.permissions & this.addonManager.PERM_CAN_ENABLE)
+                    ) {
+                        throw new Error("Firefox does not permit enabling it.");
+                    }
+                    await addon.enable();
+                } else {
+                    if (!(addon.permissions & this.addonManager.PERM_CAN_DISABLE)) {
+                        throw new Error("Firefox does not permit disabling it.");
+                    }
+                    await addon.disable();
+                }
+            }
 
-        const updateCategorySelectionControls = () => {
-            const selected = categoryById(selectedCategoryId);
-            const editable = selectedCategoryId !== null && !selected.builtIn;
+            const updated = await this.getById(id);
+            if (!updated) throw new Error("Extension disappeared afterward.");
 
-            renameCategoryElement.disabled = busy || !editable;
-            deleteCategoryElement.disabled = busy || !editable;
-            addCategoryElement.disabled = busy;
-            exportConfigElement.disabled = busy;
-            importConfigElement.disabled = busy;
-        };
+            if (updated.isActive !== desiredActive) {
+                throw new Error(
+                    `Firefox reported the extension as ${
+                        updated.isActive ? "enabled" : "disabled"
+                    } after the operation.`
+                );
+            }
 
-        const updateCounts = () => {
-            const active = rows.filter(row => row.currentActive).length;
-            const firefoxDisabled = rows.filter(row => row.appDisabled).length;
-            const changed = rows.filter(
+            return {
+                previousActive,
+                updated,
+                changed: previousActive !== updated.isActive
+            };
+        }
+    }
+
+    class SwitchboardPanel {
+        constructor({
+            configStore,
+            categoryManager,
+            extensionService,
+            getUndoSnapshot,
+            setUndoSnapshot,
+            onClose
+        }) {
+            this.configStore = configStore;
+            this.categories = categoryManager;
+            this.extensions = extensionService;
+            this.getUndoSnapshot = getUndoSnapshot;
+            this.setUndoSnapshot = setUndoSnapshot;
+            this.onClose = onClose;
+
+            this.busy = false;
+            this.keepMessage = false;
+            this.selectedCategoryId = null;
+            this.rows = [];
+            this.categoryControls = [];
+            this.ui = {};
+        }
+
+        async mount() {
+            StyleManager.ensure();
+            this.buildLayout();
+            this.bindStaticEvents();
+            await this.loadExtensionRows();
+            this.rebuildCategoryList();
+            this.renderRows();
+            this.ui.search.focus();
+        }
+
+        close() {
+            this.ui.overlay?.remove();
+        }
+
+        buildLayout() {
+            const headingGroup = Dom.create("div", {
+                children: [
+                    Dom.create("h1", { text: "Extension Switchboard" }),
+                    Dom.create("div", {
+                        className: "sw-summary sw-small",
+                        text: "Loading extensions…"
+                    })
+                ]
+            });
+
+            const exportButton = Dom.button("Export", {
+                attributes: {
+                    title: "Export categories and extension assignments as JSON"
+                }
+            });
+            const importButton = Dom.button("Import", {
+                attributes: {
+                    title: "Replace categories and assignments from a JSON configuration file"
+                }
+            });
+            const closeButton = Dom.button("×", {
+                className: "sw-close",
+                attributes: {
+                    title: "Close",
+                    "aria-label": "Close"
+                }
+            });
+            const importFile = Dom.create("input", {
+                attributes: {
+                    type: "file",
+                    accept: ".json,application/json",
+                    hidden: "hidden",
+                    "aria-hidden": "true"
+                }
+            });
+
+            const header = Dom.create("div", {
+                className: "sw-header",
+                children: [
+                    headingGroup,
+                    Dom.create("div", {
+                        className: "sw-header-actions",
+                        children: [exportButton, importButton, closeButton]
+                    }),
+                    importFile
+                ]
+            });
+
+            const search = Dom.create("input", {
+                className: "sw-search",
+                attributes: {
+                    type: "search",
+                    placeholder: "Filter by extension name, ID, or category…",
+                    autocomplete: "off"
+                }
+            });
+            const sort = Dom.create("select", {
+                className: "sw-sort",
+                attributes: { "aria-label": "Sort extensions" },
+                children: [
+                    Dom.option("name", "Name"),
+                    Dom.option("active-first", "Enabled first"),
+                    Dom.option("user-disabled-first", "Disabled first")
+                ]
+            });
+            const showUnavailable = Dom.create("input", {
+                className: "sw-show-firefox-disabled",
+                attributes: { type: "checkbox" },
+                properties: { checked: true }
+            });
+            const shown = Dom.create("div", {
+                className: "sw-shown sw-small"
+            });
+
+            const toolbar = Dom.create("div", {
+                className: "sw-toolbar",
+                children: [
+                    search,
+                    Dom.create("label", {
+                        className: "sw-control",
+                        children: [Dom.create("span", { text: "Sort:" }), sort]
+                    }),
+                    Dom.create("label", {
+                        className: "sw-control",
+                        children: [
+                            showUnavailable,
+                            Dom.create("span", { text: "Show unavailable" })
+                        ]
+                    }),
+                    shown
+                ]
+            });
+
+            const addCategory = Dom.button("New", {
+                attributes: { title: "Create category" }
+            });
+            const renameCategory = Dom.button("Rename", {
+                attributes: { title: "Rename selected category" }
+            });
+            const deleteCategory = Dom.button("Delete", {
+                attributes: { title: "Delete selected category" }
+            });
+            const categoryList = Dom.create("div", {
+                className: "sw-category-list"
+            });
+            const categoriesArea = Dom.create("aside", {
+                className: "sw-categories",
+                children: [
+                    Dom.create("div", {
+                        className: "sw-category-header",
+                        children: [
+                            Dom.create("h2", { text: "Categories" }),
+                            Dom.create("div", {
+                                className: "sw-small",
+                                text: "Toggle a category, or click its name to filter."
+                            }),
+                            Dom.create("div", {
+                                className: "sw-category-actions",
+                                children: [
+                                    addCategory,
+                                    renameCategory,
+                                    deleteCategory
+                                ]
+                            })
+                        ]
+                    }),
+                    categoryList
+                ]
+            });
+
+            const extensionList = Dom.create("div", { className: "sw-list" });
+            const main = Dom.create("div", {
+                className: "sw-main",
+                children: [
+                    categoriesArea,
+                    Dom.create("section", {
+                        className: "sw-extension-area",
+                        children: [extensionList]
+                    })
+                ]
+            });
+
+            const message = Dom.create("div", {
+                className: "sw-message sw-small",
+                text: "No unapplied changes."
+            });
+            const resultsSummary = Dom.create("summary", {
+                text: "Operation details"
+            });
+            const resultsBody = Dom.create("div", {
+                className: "sw-results-body"
+            });
+            const results = Dom.create("details", {
+                className: "sw-results",
+                properties: { hidden: true },
+                children: [resultsSummary, resultsBody]
+            });
+
+            const resetButton = Dom.button("Reset", { className: "sw-reset" });
+            const undoButton = Dom.button("Undo last apply", {
+                className: "sw-undo",
+                attributes: {
+                    title: "Restore the extension states from immediately before the last successful Apply operation"
+                },
+                properties: { disabled: true }
+            });
+            const applyReloadButton = Dom.button("Apply and reload tab", {
+                className: "sw-apply-reload",
+                properties: { disabled: true }
+            });
+            const applyButton = Dom.button("Apply changes", {
+                className: "sw-apply",
+                properties: { disabled: true }
+            });
+
+            const footer = Dom.create("div", {
+                className: "sw-footer",
+                children: [
+                    Dom.create("div", {
+                        className: "sw-feedback",
+                        children: [message, results]
+                    }),
+                    Dom.create("div", {
+                        className: "sw-actions",
+                        children: [
+                            resetButton,
+                            undoButton,
+                            applyReloadButton,
+                            applyButton
+                        ]
+                    })
+                ]
+            });
+
+            const panel = Dom.create("div", {
+                className: "sw-panel",
+                attributes: {
+                    role: "dialog",
+                    "aria-label": "Extension Switchboard",
+                    "aria-modal": "true"
+                },
+                children: [header, toolbar, main, footer]
+            });
+            const overlay = Dom.create("div", {
+                id: APP.PANEL_ID,
+                children: [panel]
+            });
+            document.documentElement.append(overlay);
+
+            this.ui = {
+                overlay,
+                panel,
+                summary: headingGroup.querySelector(".sw-summary"),
+                exportButton,
+                importButton,
+                importFile,
+                closeButton,
+                search,
+                sort,
+                showUnavailable,
+                shown,
+                addCategory,
+                renameCategory,
+                deleteCategory,
+                categoryList,
+                extensionList,
+                message,
+                results,
+                resultsSummary,
+                resultsBody,
+                resetButton,
+                undoButton,
+                applyReloadButton,
+                applyButton
+            };
+        }
+
+        bindStaticEvents() {
+            const ui = this.ui;
+
+            ui.search.addEventListener("input", () => this.renderRows());
+            ui.sort.addEventListener("change", () => this.renderRows());
+            ui.showUnavailable.addEventListener("change", () => this.renderRows());
+
+            ui.addCategory.addEventListener("click", () => this.createCategory());
+            ui.renameCategory.addEventListener("click", () => this.renameCategory());
+            ui.deleteCategory.addEventListener("click", () => this.deleteCategory());
+
+            ui.exportButton.addEventListener("click", () => {
+                try {
+                    this.exportConfiguration();
+                } catch (error) {
+                    FirefoxCompat.reportError(error);
+                    this.keepMessage = true;
+                    ui.message.textContent =
+                        "Configuration export failed. See Browser Console.";
+                }
+            });
+
+            ui.importButton.addEventListener("click", () => ui.importFile.click());
+            ui.importFile.addEventListener("change", () => {
+                this.importConfiguration().catch(FirefoxCompat.reportError);
+            });
+
+            ui.resetButton.addEventListener("click", () => {
+                this.resetToLiveState().catch(FirefoxCompat.reportError);
+            });
+            ui.applyButton.addEventListener("click", () => {
+                this.performApply().catch(FirefoxCompat.reportError);
+            });
+            ui.applyReloadButton.addEventListener("click", () => {
+                this.performApply({ reloadCurrentTab: true })
+                    .catch(FirefoxCompat.reportError);
+            });
+            ui.undoButton.addEventListener("click", () => {
+                this.undoLastApply().catch(FirefoxCompat.reportError);
+            });
+
+            const handleClose = () => {
+                if (!this.busy) this.onClose();
+            };
+
+            ui.closeButton.addEventListener("click", handleClose);
+            ui.overlay.addEventListener("click", event => {
+                if (event.target === ui.overlay) handleClose();
+            });
+            ui.overlay.addEventListener("keydown", event => {
+                if (event.key === "Escape") handleClose();
+            });
+        }
+
+        async loadExtensionRows() {
+            const addons = await this.extensions.listUserExtensions();
+
+            for (const addon of addons) {
+                const row = this.createExtensionRow(addon);
+                this.rows.push(row);
+                this.ui.extensionList.append(row.element);
+            }
+        }
+
+        createExtensionRow(addon) {
+            const checkbox = Dom.create("input", {
+                attributes: { type: "checkbox" },
+                properties: {
+                    checked: addon.isActive,
+                    disabled: !this.extensions.canToggle(addon)
+                }
+            });
+            const iconURL = this.extensions.getIconURL(addon);
+            const icon = Dom.create("img", {
+                className: "sw-icon",
+                attributes: {
+                    src: iconURL,
+                    alt: "",
+                    "aria-hidden": "true"
+                },
+                properties: { draggable: false }
+            });
+            icon.addEventListener("error", () => {
+                icon.src = FALLBACK_EXTENSION_ICON;
+            }, { once: true });
+
+            const siteAccess = this.extensions.getSiteAccess(addon);
+            const children = addon.appDisabled
+                ? [
+                    Dom.create("strong", { text: "Disabled by Firefox" }),
+                    document.createTextNode(" · Access: "),
+                    Dom.create("strong", { text: siteAccess.label })
+                ]
+                : [
+                    document.createTextNode("Access: "),
+                    Dom.create("strong", { text: siteAccess.label })
+                ];
+
+            const scope = Dom.create("div", {
+                className: "sw-scope",
+                attributes: { title: siteAccess.title },
+                children
+            });
+
+            const categorySelect = Dom.create("select", {
+                className: "sw-category-select",
+                attributes: {
+                    "aria-label": `Category for ${addon.name}`,
+                    title: "Assign this extension to one category"
+                }
+            });
+            const element = Dom.create("div", {
+                className: "sw-row",
+                children: [
+                    checkbox,
+                    icon,
+                    Dom.create("div", {
+                        children: [
+                            Dom.create("div", {
+                                className: "sw-name",
+                                text: addon.name,
+                                attributes: { title: `Extension ID: ${addon.id}` }
+                            }),
+                            scope
+                        ]
+                    }),
+                    categorySelect
+                ]
+            });
+
+            const row = {
+                id: addon.id,
+                name: addon.name,
+                searchText: "",
+                currentActive: addon.isActive,
+                currentUserDisabled: addon.userDisabled,
+                appDisabled: addon.appDisabled,
+                locked: !this.extensions.canToggle(addon),
+                iconURL,
+                siteAccess,
+                lastError: null,
+                checkbox,
+                icon,
+                categorySelect,
+                scope,
+                element
+            };
+
+            this.updateRowStateClasses(row);
+            this.updateRowChangeState(row);
+            this.rebuildCategorySelect(row);
+
+            checkbox.addEventListener("change", () => {
+                row.lastError = null;
+                this.updateRowScope(row);
+                this.updateRowChangeState(row);
+                this.keepMessage = false;
+                this.updateCategoryStates();
+                this.updateCounts();
+            });
+
+            categorySelect.addEventListener("change", () => {
+                this.changeRowCategory(row);
+            });
+
+            return row;
+        }
+
+        clearOperationResults() {
+            this.ui.results.hidden = true;
+            this.ui.results.open = false;
+            this.ui.resultsBody.replaceChildren();
+        }
+
+        appendResultGroup(title, entries, formatter = value => value) {
+            if (!entries.length) return;
+
+            this.ui.resultsBody.append(Dom.create("div", {
+                className: "sw-result-group",
+                children: [
+                    Dom.create("div", {
+                        className: "sw-result-title",
+                        text: `${title} (${entries.length})`
+                    }),
+                    Dom.create("ul", {
+                        className: "sw-result-list",
+                        children: entries.map(entry => Dom.create("li", {
+                            text: formatter(entry)
+                        }))
+                    })
+                ]
+            }));
+        }
+
+        showOperationResults({ enabled, disabled, failures }) {
+            this.ui.resultsBody.replaceChildren();
+            this.appendResultGroup("Enabled", enabled);
+            this.appendResultGroup("Disabled", disabled);
+            this.appendResultGroup(
+                "Failed",
+                failures,
+                failure => `${failure.name}: ${failure.error}`
+            );
+
+            const total = enabled.length + disabled.length + failures.length;
+            this.ui.results.hidden = total === 0;
+            this.ui.results.open = failures.length > 0;
+            this.ui.resultsSummary.textContent = failures.length
+                ? `Operation details · ${failures.length} failed`
+                : "Operation details";
+        }
+
+        persistOrRollback(snapshot) {
+            try {
+                this.configStore.save(this.categories.config);
+                return true;
+            } catch (error) {
+                this.categories.replaceConfig(snapshot);
+                FirefoxCompat.reportError(error);
+                this.ui.message.textContent =
+                    "Category configuration could not be saved. See Browser Console.";
+                this.keepMessage = true;
+                return false;
+            }
+        }
+
+        exportConfiguration() {
+            const exportedAt = new Date();
+            const datePart = [
+                exportedAt.getFullYear(),
+                String(exportedAt.getMonth() + 1).padStart(2, "0"),
+                String(exportedAt.getDate()).padStart(2, "0")
+            ].join("-");
+            const payload = this.configStore.createExportPayload(
+                this.categories.config,
+                exportedAt
+            );
+            const blob = new Blob(
+                [`${JSON.stringify(payload, null, 2)}\n`],
+                { type: "application/json" }
+            );
+            const url = URL.createObjectURL(blob);
+            const anchor = Dom.create("a", {
+                attributes: {
+                    href: url,
+                    download: `ExtensionSwitchboard-${datePart}.json`,
+                    hidden: "hidden"
+                }
+            });
+
+            document.documentElement.append(anchor);
+            anchor.click();
+            window.setTimeout(() => {
+                URL.revokeObjectURL(url);
+                anchor.remove();
+            }, 0);
+
+            const categoryCount = this.categories.config.categories.length;
+            const assignmentCount = Object.keys(
+                this.categories.config.assignments
+            ).length;
+            this.keepMessage = true;
+            this.ui.message.textContent =
+                `Exported ${categoryCount} user categor${
+                    categoryCount === 1 ? "y" : "ies"
+                } and ${assignmentCount} assignment${
+                    assignmentCount === 1 ? "" : "s"
+                }.`;
+        }
+
+        async importConfiguration() {
+            const file = this.ui.importFile.files?.[0] ?? null;
+            this.ui.importFile.value = "";
+            if (!file) return;
+
+            let importedConfig;
+            try {
+                importedConfig = this.configStore.parseImport(await file.text());
+            } catch (error) {
+                FirefoxCompat.reportError(error);
+                FirefoxCompat.alert(
+                    error instanceof Error
+                        ? error.message
+                        : "The configuration could not be imported."
+                );
+                return;
+            }
+
+            const categoryCount = importedConfig.categories.length;
+            const assignmentCount = Object.keys(importedConfig.assignments).length;
+            const confirmed = FirefoxCompat.confirm(
+                "Import configuration",
+                "Replace the current categories and assignments with " +
+                `the configuration from “${file.name}”?\n\n` +
+                `${categoryCount} user categor${
+                    categoryCount === 1 ? "y" : "ies"
+                } and ${assignmentCount} extension assignment${
+                    assignmentCount === 1 ? "" : "s"
+                } will be imported. Extension enabled/disabled states will not change.`
+            );
+            if (!confirmed) return;
+
+            const snapshot = this.categories.snapshot();
+            this.categories.replaceConfig(importedConfig);
+            if (!this.persistOrRollback(snapshot)) return;
+
+            this.selectedCategoryId = null;
+            this.clearOperationResults();
+            this.rebuildAllCategorySelects();
+            this.rebuildCategoryList();
+            this.renderRows();
+            this.keepMessage = true;
+            this.ui.message.textContent =
+                `Imported ${categoryCount} user categor${
+                    categoryCount === 1 ? "y" : "ies"
+                } and ${assignmentCount} assignment${
+                    assignmentCount === 1 ? "" : "s"
+                }. Extension states were left unchanged.`;
+        }
+
+        updateCategorySelectionControls() {
+            const selected = this.categories.getById(this.selectedCategoryId);
+            const editable = this.selectedCategoryId !== null && !selected.builtIn;
+
+            this.ui.renameCategory.disabled = this.busy || !editable;
+            this.ui.deleteCategory.disabled = this.busy || !editable;
+            this.ui.addCategory.disabled = this.busy;
+            this.ui.exportButton.disabled = this.busy;
+            this.ui.importButton.disabled = this.busy;
+        }
+
+        updateCounts() {
+            const active = this.rows.filter(row => row.currentActive).length;
+            const unavailable = this.rows.filter(row => row.appDisabled).length;
+            const changed = this.rows.filter(
                 row => row.checkbox.checked !== row.currentActive
             ).length;
-            const visible = rows.filter(row => !row.element.hidden).length;
+            const visible = this.rows.filter(row => !row.element.hidden).length;
             const changeLabel = changed === 1 ? "change" : "changes";
-            const undoCount = lastApplySnapshot?.entries?.length ?? 0;
+            const undoCount = this.getUndoSnapshot()?.entries?.length ?? 0;
 
-            summaryElement.textContent =
-                `${rows.length} extensions · ${active} enabled · ` +
-                `${config.categories.length + 1} categories · ` +
-                `${firefoxDisabled} unavailable`;
-            shownElement.textContent = `${visible} shown`;
+            this.ui.summary.textContent =
+                `${this.categories.config.categories.length + 1} categories · ` +
+                `${this.rows.length} extensions · ${active} enabled · ` +
+                `${unavailable} unavailable`;
+            this.ui.shown.textContent = `${visible} shown`;
 
-            applyElement.disabled = busy || changed === 0;
-            applyReloadElement.disabled = busy || changed === 0;
-            applyElement.textContent = changed
+            this.ui.applyButton.disabled = this.busy || changed === 0;
+            this.ui.applyReloadButton.disabled = this.busy || changed === 0;
+            this.ui.applyButton.textContent = changed
                 ? `Apply ${changed} ${changeLabel}`
                 : "Apply changes";
-            applyReloadElement.textContent = changed
+            this.ui.applyReloadButton.textContent = changed
                 ? `Apply ${changed} ${changeLabel} and reload tab`
                 : "Apply and reload tab";
 
-            undoElement.disabled = busy || undoCount === 0;
-            undoElement.textContent = undoCount
+            this.ui.undoButton.disabled = this.busy || undoCount === 0;
+            this.ui.undoButton.textContent = undoCount
                 ? `Undo last apply (${undoCount})`
                 : "Undo last apply";
 
-            if (!busy && changed === 0 && !keepMessage) {
-                messageElement.textContent = "No unapplied changes.";
+            if (!this.busy && changed === 0 && !this.keepMessage) {
+                this.ui.message.textContent = "No unapplied changes.";
             }
-        };
+        }
 
-        const updateRowStateClasses = row => {
+        updateRowStateClasses(row) {
             row.element.classList.toggle("active", row.currentActive);
             row.element.classList.toggle(
                 "user-disabled",
                 row.currentUserDisabled
             );
-            row.element.classList.toggle(
-                "firefox-disabled",
-                row.appDisabled
-            );
-        };
+            row.element.classList.toggle("firefox-disabled", row.appDisabled);
+        }
 
-        const updateCheckboxDescription = row => {
+        updateCheckboxDescription(row) {
             let title;
 
             if (row.appDisabled) {
@@ -1119,84 +1595,92 @@
 
             row.checkbox.title = title;
             row.checkbox.setAttribute("aria-label", `${row.name}: ${title}`);
-        };
+        }
 
-        const updateRowChangeState = row => {
+        updateRowChangeState(row) {
             row.element.classList.toggle(
                 "changed",
                 row.checkbox.checked !== row.currentActive
             );
-            updateCheckboxDescription(row);
-        };
+            this.updateCheckboxDescription(row);
+        }
 
-        const updateRowScope = row => {
+        updateRowScope(row) {
             const parts = [];
-
             if (row.appDisabled) parts.push("Disabled by Firefox");
-            parts.push(`Site access: ${row.siteAccess.label}`);
+            parts.push(`Access: ${row.siteAccess.label}`);
             if (row.lastError) parts.push(`Operation failed: ${row.lastError}`);
 
             row.scope.textContent = parts.join(" · ");
             row.scope.title = row.lastError
-                ? `${row.siteAccess.title}
-
-Last operation failed: ${row.lastError}`
+                ? `${row.siteAccess.title}\n\nLast operation failed: ${row.lastError}`
                 : row.siteAccess.title;
             row.element.classList.toggle("apply-failed", Boolean(row.lastError));
-        };
+        }
 
-        const updateRow = (
+        updateRow(
             row,
             addon,
             { preserveDesired = false, clearFailure = true } = {}
-        ) => {
+        ) {
             row.currentActive = addon.isActive;
             row.currentUserDisabled = addon.userDisabled;
             row.appDisabled = addon.appDisabled;
-            row.locked = !canToggle(addon);
-            row.siteAccess = getSiteAccess(addon);
+            row.locked = !this.extensions.canToggle(addon);
 
-            if (!preserveDesired) {
-                row.checkbox.checked = addon.isActive;
-            }
-            if (clearFailure) {
-                row.lastError = null;
+            const iconURL = this.extensions.getIconURL(addon);
+            if (iconURL !== row.iconURL) {
+                row.iconURL = iconURL;
+                row.icon.src = iconURL;
             }
 
-            row.checkbox.disabled = busy || row.locked;
-            updateRowScope(row);
-            updateRowStateClasses(row);
-            updateRowChangeState(row);
-        };
+            row.siteAccess = this.extensions.getSiteAccess(addon);
 
-        const markRowFailure = (row, error) => {
+            if (!preserveDesired) row.checkbox.checked = addon.isActive;
+            if (clearFailure) row.lastError = null;
+
+            row.checkbox.disabled = this.busy || row.locked;
+            this.updateRowScope(row);
+            this.updateRowStateClasses(row);
+            this.updateRowChangeState(row);
+            this.updateRowSearchText(row);
+        }
+
+        markRowFailure(row, error) {
             row.lastError = error instanceof Error ? error.message : String(error);
-            updateRowScope(row);
-            updateRowChangeState(row);
-        };
+            this.updateRowScope(row);
+            this.updateRowChangeState(row);
+        }
 
-        const rebuildCategorySelect = row => {
-            const selectedId = assignedCategoryId(row.id);
-            row.categorySelect.replaceChildren();
+        updateRowSearchText(row) {
+            const categoryName = this.categories.getById(
+                this.categories.assignedId(row.id)
+            ).name;
+            row.searchText = `${row.name}\n${row.id}\n${categoryName}\n${
+                row.siteAccess.label
+            }`.toLocaleLowerCase();
+        }
 
-            for (const category of categoriesForDisplay()) {
-                const option = createHtmlElement("option", {
-                    text: category.name,
-                    attributes: { value: category.id }
-                });
-                row.categorySelect.append(option);
-            }
-
+        rebuildCategorySelect(row) {
+            const selectedId = this.categories.assignedId(row.id);
+            row.categorySelect.replaceChildren(
+                ...this.categories.listForDisplay().map(category =>
+                    Dom.option(category.id, category.name)
+                )
+            );
             row.categorySelect.value = selectedId;
-            row.categorySelect.disabled = busy;
-            row.searchText = `${row.name}\n${row.id}\n${categoryById(selectedId).name}\n${row.siteAccess.label}`
-                .toLocaleLowerCase();
-        };
+            row.categorySelect.disabled = this.busy;
+            this.updateRowSearchText(row);
+        }
 
-        const updateCategoryStates = () => {
-            for (const control of categoryControls) {
-                const members = rows.filter(
-                    row => assignedCategoryId(row.id) === control.categoryId
+        rebuildAllCategorySelects() {
+            for (const row of this.rows) this.rebuildCategorySelect(row);
+        }
+
+        updateCategoryStates() {
+            for (const control of this.categoryControls) {
+                const members = this.rows.filter(
+                    row => this.categories.assignedId(row.id) === control.categoryId
                 );
                 const toggleableMembers = members.filter(row => !row.locked);
                 const enabled = toggleableMembers.filter(
@@ -1208,165 +1692,54 @@ Last operation failed: ${row.lastError}`
                 control.checkbox.checked =
                     toggleableMembers.length > 0 &&
                     enabled === toggleableMembers.length;
-                control.checkbox.disabled = busy || toggleableMembers.length === 0;
+                control.checkbox.disabled =
+                    this.busy || toggleableMembers.length === 0;
 
-                const locked = members.length - toggleableMembers.length;
-                control.count.textContent = locked
-                    ? `${enabled}/${toggleableMembers.length} · ${locked} unavailable`
+                const unavailable = members.length - toggleableMembers.length;
+                control.count.textContent = unavailable
+                    ? `${enabled}/${toggleableMembers.length} · ${unavailable} unavailable`
                     : `${enabled}/${toggleableMembers.length}`;
-
                 control.element.classList.toggle(
                     "selected",
-                    selectedCategoryId === control.categoryId
+                    this.selectedCategoryId === control.categoryId
                 );
+                control.nameButton.disabled = this.busy;
             }
 
-            updateCategorySelectionControls();
-        };
+            this.updateCategorySelectionControls();
+        }
 
-        const setBusy = value => {
-            busy = value;
-            searchElement.disabled = value;
-            sortElement.disabled = value;
-            showFirefoxDisabledElement.disabled = value;
-            resetElement.disabled = value;
-            undoElement.disabled = value;
-            applyReloadElement.disabled = value;
-            applyElement.disabled = value;
-            closeElement.disabled = value;
+        setBusy(value) {
+            this.busy = value;
 
-            for (const row of rows) {
+            for (const control of [
+                this.ui.search,
+                this.ui.sort,
+                this.ui.showUnavailable,
+                this.ui.resetButton,
+                this.ui.closeButton
+            ]) {
+                control.disabled = value;
+            }
+
+            for (const row of this.rows) {
                 row.checkbox.disabled = value || row.locked;
                 row.categorySelect.disabled = value;
             }
 
-            for (const control of categoryControls) {
-                control.checkbox.disabled = value || control.checkbox.disabled;
-                control.nameButton.disabled = value;
-            }
-
-            updateCategoryStates();
-            updateCounts();
-        };
-
-        const addons = (await AddonManager.getAddonsByTypes(["extension"]))
-            .filter(addon => !addon.hidden && !addon.isSystem);
-
-        for (const addon of addons) {
-            const rowElement = createHtmlElement("div", { className: "sw-row" });
-            const checkbox = createHtmlElement("input", {
-                attributes: { type: "checkbox" }
-            });
-            checkbox.checked = addon.isActive;
-            checkbox.disabled = !canToggle(addon);
-
-            const details = createHtmlElement("div");
-            const name = createHtmlElement("div", {
-                className: "sw-name",
-                text: addon.name,
-                attributes: { title: `Extension ID: ${addon.id}` }
-            });
-            const siteAccess = getSiteAccess(addon);
-            const scope = createHtmlElement("div", {
-                className: "sw-scope",
-                text: addon.appDisabled
-                    ? `Disabled by Firefox · Site access: ${siteAccess.label}`
-                    : `Site access: ${siteAccess.label}`,
-                attributes: { title: siteAccess.title }
-            });
-            const categorySelect = createHtmlElement("select", {
-                className: "sw-category-select",
-                attributes: {
-                    "aria-label": `Category for ${addon.name}`,
-                    title: "Assign this extension to one category"
-                }
-            });
-
-            details.append(name, scope);
-            rowElement.append(checkbox, details, categorySelect);
-
-            const row = {
-                id: addon.id,
-                name: addon.name,
-                searchText: "",
-                currentActive: addon.isActive,
-                currentUserDisabled: addon.userDisabled,
-                appDisabled: addon.appDisabled,
-                locked: !canToggle(addon),
-                siteAccess,
-                lastError: null,
-                checkbox,
-                categorySelect,
-                scope,
-                element: rowElement
-            };
-
-            updateRowStateClasses(row);
-            updateRowChangeState(row);
-            rebuildCategorySelect(row);
-
-            checkbox.addEventListener("change", () => {
-                row.lastError = null;
-                updateRowScope(row);
-                updateRowChangeState(row);
-                keepMessage = false;
-                updateCategoryStates();
-                updateCounts();
-            });
-
-            categorySelect.addEventListener("change", () => {
-                const previousCategoryId = assignedCategoryId(row.id);
-                const newCategoryId = categorySelect.value;
-
-                if (newCategoryId === UNCATEGORIZED_ID) {
-                    delete config.assignments[row.id];
-                } else {
-                    config.assignments[row.id] = newCategoryId;
-                }
-
-                if (!persistConfig()) {
-                    if (previousCategoryId === UNCATEGORIZED_ID) {
-                        delete config.assignments[row.id];
-                    } else {
-                        config.assignments[row.id] = previousCategoryId;
-                    }
-                    rebuildCategorySelect(row);
-                    rebuildCategoryList();
-                    renderRows();
-                    return;
-                }
-
-                row.searchText = `${row.name}\n${row.id}\n${categoryById(newCategoryId).name}\n${row.siteAccess.label}`
-                    .toLocaleLowerCase();
-                keepMessage = true;
-                messageElement.textContent =
-                    `Assigned “${row.name}” to ${categoryById(newCategoryId).name}.`;
-                rebuildCategoryList();
-                renderRows();
-            });
-
-            rows.push(row);
-            listElement.append(rowElement);
+            this.updateCategoryStates();
+            this.updateCounts();
         }
 
-        const compareNames = (a, b) => a.name.localeCompare(
-            b.name,
-            undefined,
-            { sensitivity: "base" }
-        );
+        compareRows(a, b) {
+            if (a.appDisabled !== b.appDisabled) return a.appDisabled ? 1 : -1;
 
-        const compareRows = (a, b) => {
-            if (a.appDisabled !== b.appDisabled) {
-                return a.appDisabled ? 1 : -1;
-            }
-
-            switch (sortElement.value) {
+            switch (this.ui.sort.value) {
                 case "active-first":
                     if (a.currentActive !== b.currentActive) {
                         return a.currentActive ? -1 : 1;
                     }
                     break;
-
                 case "user-disabled-first":
                     if (a.currentUserDisabled !== b.currentUserDisabled) {
                         return a.currentUserDisabled ? -1 : 1;
@@ -1374,370 +1747,289 @@ Last operation failed: ${row.lastError}`
                     break;
             }
 
-            return compareNames(a, b);
-        };
+            return a.name.localeCompare(b.name, undefined, {
+                sensitivity: "base"
+            });
+        }
 
-        const renderRows = () => {
-            const query = searchElement.value.trim().toLocaleLowerCase();
+        renderRows() {
+            const query = this.ui.search.value.trim().toLocaleLowerCase();
 
-            for (const row of [...rows].sort(compareRows)) {
+            for (const row of [...this.rows].sort((a, b) => this.compareRows(a, b))) {
                 const hiddenBySearch = Boolean(query) &&
                     !row.searchText.includes(query);
                 const hiddenByFirefoxState = row.appDisabled &&
-                    !showFirefoxDisabledElement.checked;
-                const hiddenByCategory = selectedCategoryId !== null &&
-                    assignedCategoryId(row.id) !== selectedCategoryId;
+                    !this.ui.showUnavailable.checked;
+                const hiddenByCategory = this.selectedCategoryId !== null &&
+                    this.categories.assignedId(row.id) !== this.selectedCategoryId;
 
                 row.element.hidden =
                     hiddenBySearch || hiddenByFirefoxState || hiddenByCategory;
-                listElement.append(row.element);
+                this.ui.extensionList.append(row.element);
             }
 
-            updateCategoryStates();
-            updateCounts();
-        };
+            this.updateCategoryStates();
+            this.updateCounts();
+        }
 
-        function rebuildCategoryList() {
-            categoryListElement.replaceChildren();
-            categoryControls.length = 0;
+        rebuildCategoryList() {
+            this.ui.categoryList.replaceChildren();
+            this.categoryControls.length = 0;
 
-            const allRow = createHtmlElement("div", {
-                className: "sw-category-row sw-all-row"
+            const allName = Dom.button("All extensions", {
+                className: "sw-category-name"
             });
-            const allSpacer = createHtmlElement("span", {
-                className: "sw-all-spacer"
-            });
-            const allName = createHtmlElement("button", {
-                className: "sw-category-name",
-                text: "All extensions",
-                attributes: { type: "button" }
-            });
-            const allCount = createHtmlElement("span", {
-                className: "sw-category-count",
-                text: String(rows.length)
-            });
-            allRow.classList.toggle("selected", selectedCategoryId === null);
-            allName.disabled = busy;
+            allName.disabled = this.busy;
             allName.addEventListener("click", () => {
-                selectedCategoryId = null;
-                rebuildCategoryList();
-                renderRows();
+                this.selectedCategoryId = null;
+                this.rebuildCategoryList();
+                this.renderRows();
             });
-            allRow.append(allSpacer, allName, allCount);
-            categoryListElement.append(allRow);
 
-            for (const category of categoriesForDisplay()) {
-                const categoryRow = createHtmlElement("div", {
-                    className: "sw-category-row"
-                });
-                const checkbox = createHtmlElement("input", {
+            const allRow = Dom.create("div", {
+                className: "sw-category-row sw-all-row",
+                children: [
+                    Dom.create("span", { className: "sw-all-spacer" }),
+                    allName,
+                    Dom.create("span", {
+                        className: "sw-category-count",
+                        text: String(this.rows.length)
+                    })
+                ]
+            });
+            allRow.classList.toggle("selected", this.selectedCategoryId === null);
+            this.ui.categoryList.append(allRow);
+
+            for (const category of this.categories.listForDisplay()) {
+                const checkbox = Dom.create("input", {
                     attributes: {
                         type: "checkbox",
                         title: `Enable or disable all toggleable extensions in ${category.name}`,
                         "aria-label": `Toggle category ${category.name}`
                     }
                 });
-                const nameButton = createHtmlElement("button", {
+                const nameButton = Dom.button(category.name, {
                     className: "sw-category-name",
-                    text: category.name,
                     attributes: {
-                        type: "button",
                         title: `Show only extensions in ${category.name}`
                     }
                 });
-                const count = createHtmlElement("span", {
+                const count = Dom.create("span", {
                     className: "sw-category-count"
+                });
+                const element = Dom.create("div", {
+                    className: "sw-category-row",
+                    children: [checkbox, nameButton, count]
                 });
 
                 checkbox.addEventListener("change", () => {
                     const desiredState = checkbox.checked;
-
-                    for (const row of rows) {
+                    for (const row of this.rows) {
                         if (
-                            assignedCategoryId(row.id) === category.id &&
+                            this.categories.assignedId(row.id) === category.id &&
                             !row.locked
                         ) {
                             row.checkbox.checked = desiredState;
                             row.lastError = null;
-                            updateRowScope(row);
-                            updateRowChangeState(row);
+                            this.updateRowScope(row);
+                            this.updateRowChangeState(row);
                         }
                     }
-
-                    keepMessage = false;
-                    updateCategoryStates();
-                    updateCounts();
+                    this.keepMessage = false;
+                    this.updateCategoryStates();
+                    this.updateCounts();
                 });
 
                 nameButton.addEventListener("click", () => {
-                    selectedCategoryId = category.id;
-                    rebuildCategoryList();
-                    renderRows();
+                    this.selectedCategoryId = category.id;
+                    this.rebuildCategoryList();
+                    this.renderRows();
                 });
 
-                categoryRow.append(checkbox, nameButton, count);
-                categoryListElement.append(categoryRow);
-                categoryControls.push({
+                this.ui.categoryList.append(element);
+                this.categoryControls.push({
                     categoryId: category.id,
                     checkbox,
                     nameButton,
                     count,
-                    element: categoryRow
+                    element
                 });
             }
 
-            updateCategoryStates();
+            this.updateCategoryStates();
         }
 
-        const refresh = async () => {
-            for (const row of rows) {
-                const addon = await AddonManager.getAddonByID(row.id);
-                if (addon) updateRow(row, addon);
-            }
-            renderRows();
-        };
+        changeRowCategory(row) {
+            const snapshot = this.categories.snapshot();
+            const newCategoryId = row.categorySelect.value;
 
-        addCategoryElement.addEventListener("click", () => {
-            const name = askForCategoryName(
+            try {
+                this.categories.assign(row.id, newCategoryId);
+            } catch (error) {
+                FirefoxCompat.alert(error.message);
+                this.rebuildCategorySelect(row);
+                return;
+            }
+
+            if (!this.persistOrRollback(snapshot)) {
+                this.rebuildAllCategorySelects();
+                this.rebuildCategoryList();
+                this.renderRows();
+                return;
+            }
+
+            this.updateRowSearchText(row);
+            this.keepMessage = true;
+            this.ui.message.textContent =
+                `Assigned “${row.name}” to ${
+                    this.categories.getById(newCategoryId).name
+                }.`;
+            this.rebuildCategoryList();
+            this.renderRows();
+        }
+
+        createCategory() {
+            const name = FirefoxCompat.promptText(
                 "Create category",
                 "Enter a name for the new category:"
             );
             if (name === null) return;
 
-            if (!name) {
-                showAlert("A category name cannot be empty.");
+            const snapshot = this.categories.snapshot();
+            try {
+                this.categories.create(name);
+            } catch (error) {
+                FirefoxCompat.alert(error.message);
                 return;
             }
 
-            if (
-                name.length > 80 ||
-                normalizeCategoryName(name) ===
-                    normalizeCategoryName("Uncategorized") ||
-                config.categories.some(
-                    category => normalizeCategoryName(category.name) ===
-                        normalizeCategoryName(name)
-                )
-            ) {
-                showAlert(
-                    name.length > 80
-                        ? "Category names are limited to 80 characters."
-                        : "That category name is already in use."
-                );
-                return;
-            }
+            if (!this.persistOrRollback(snapshot)) return;
 
-            const category = { id: makeCategoryId(), name };
-            config.categories.push(category);
-
-            if (!persistConfig()) {
-                config.categories.pop();
-                return;
-            }
-
-            selectedCategoryId = UNCATEGORIZED_ID;
-            for (const row of rows) rebuildCategorySelect(row);
-            rebuildCategoryList();
-            renderRows();
-            keepMessage = true;
-            messageElement.textContent =
+            this.selectedCategoryId = APP.UNCATEGORIZED_ID;
+            this.rebuildAllCategorySelects();
+            this.rebuildCategoryList();
+            this.renderRows();
+            this.keepMessage = true;
+            this.ui.message.textContent =
                 `Created category “${name}”. Showing Uncategorized extensions.`;
-        });
+        }
 
-        renameCategoryElement.addEventListener("click", () => {
-            const category = config.categories.find(
-                item => item.id === selectedCategoryId
+        renameCategory() {
+            const category = this.categories.config.categories.find(
+                item => item.id === this.selectedCategoryId
             );
             if (!category) return;
 
-            const name = askForCategoryName(
+            const name = FirefoxCompat.promptText(
                 "Rename category",
                 "Enter a new category name:",
                 category.name
             );
             if (name === null || name === category.name) return;
 
-            if (!name) {
-                showAlert("A category name cannot be empty.");
+            const snapshot = this.categories.snapshot();
+            try {
+                this.categories.rename(category.id, name);
+            } catch (error) {
+                FirefoxCompat.alert(error.message);
                 return;
             }
 
-            if (
-                name.length > 80 ||
-                normalizeCategoryName(name) ===
-                    normalizeCategoryName("Uncategorized") ||
-                config.categories.some(
-                    item => item.id !== category.id &&
-                        normalizeCategoryName(item.name) ===
-                            normalizeCategoryName(name)
-                )
-            ) {
-                showAlert(
-                    name.length > 80
-                        ? "Category names are limited to 80 characters."
-                        : "That category name is already in use."
-                );
-                return;
-            }
+            if (!this.persistOrRollback(snapshot)) return;
 
-            const previousName = category.name;
-            category.name = name;
+            this.rebuildAllCategorySelects();
+            this.rebuildCategoryList();
+            this.renderRows();
+            this.keepMessage = true;
+            this.ui.message.textContent = `Renamed category to “${name}”.`;
+        }
 
-            if (!persistConfig()) {
-                category.name = previousName;
-                return;
-            }
-
-            for (const row of rows) rebuildCategorySelect(row);
-            rebuildCategoryList();
-            renderRows();
-            keepMessage = true;
-            messageElement.textContent = `Renamed category to “${name}”.`;
-        });
-
-        deleteCategoryElement.addEventListener("click", () => {
-            const categoryIndex = config.categories.findIndex(
-                item => item.id === selectedCategoryId
+        deleteCategory() {
+            const category = this.categories.config.categories.find(
+                item => item.id === this.selectedCategoryId
             );
-            if (categoryIndex < 0) return;
+            if (!category) return;
 
-            const category = config.categories[categoryIndex];
-            const assignedRows = rows.filter(
-                row => assignedCategoryId(row.id) === category.id
+            const assignedRows = this.rows.filter(
+                row => this.categories.assignedId(row.id) === category.id
             );
-            const confirmed = confirmAction(
+            const confirmed = FirefoxCompat.confirm(
                 "Delete category",
                 `Delete “${category.name}”?\n\n` +
                 `${assignedRows.length} extension(s) will be moved to Uncategorized.`
             );
             if (!confirmed) return;
 
-            const previousConfig = JSON.parse(JSON.stringify(config));
-            config.categories.splice(categoryIndex, 1);
-
-            for (const [extensionId, categoryId] of Object.entries(
-                config.assignments
-            )) {
-                if (categoryId === category.id) {
-                    delete config.assignments[extensionId];
-                }
-            }
-
-            if (!persistConfig()) {
-                config.categories = previousConfig.categories;
-                config.assignments = previousConfig.assignments;
+            const snapshot = this.categories.snapshot();
+            try {
+                this.categories.remove(category.id);
+            } catch (error) {
+                FirefoxCompat.alert(error.message);
                 return;
             }
 
-            selectedCategoryId = UNCATEGORIZED_ID;
-            for (const row of rows) rebuildCategorySelect(row);
-            rebuildCategoryList();
-            renderRows();
-            keepMessage = true;
-            messageElement.textContent =
+            if (!this.persistOrRollback(snapshot)) return;
+
+            this.selectedCategoryId = APP.UNCATEGORIZED_ID;
+            this.rebuildAllCategorySelects();
+            this.rebuildCategoryList();
+            this.renderRows();
+            this.keepMessage = true;
+            this.ui.message.textContent =
                 `Deleted “${category.name}”; its extensions are now Uncategorized.`;
-        });
+        }
 
-        exportConfigElement.addEventListener("click", () => {
-            try {
-                exportConfiguration();
-            } catch (error) {
-                reportError(error);
-                keepMessage = true;
-                messageElement.textContent =
-                    "Configuration export failed. See Browser Console.";
+        async refreshRows({ preserveDesired = false } = {}) {
+            for (const row of this.rows) {
+                const addon = await this.extensions.getById(row.id);
+                if (addon) this.updateRow(row, addon, { preserveDesired });
             }
-        });
+            this.renderRows();
+        }
 
-        importConfigElement.addEventListener("click", () => {
-            importFileElement.click();
-        });
-
-        importFileElement.addEventListener("change", async () => {
-            const file = importFileElement.files?.[0] ?? null;
-            importFileElement.value = "";
-            if (!file) return;
-
-            let importedConfig;
+        async resetToLiveState() {
+            this.keepMessage = true;
+            this.clearOperationResults();
+            this.ui.message.textContent = "Refreshing current extension states…";
+            this.setBusy(true);
 
             try {
-                importedConfig = parseImportedConfig(await file.text());
-            } catch (error) {
-                reportError(error);
-                showAlert(
-                    error instanceof Error
-                        ? error.message
-                        : "The configuration could not be imported."
-                );
-                return;
-            }
-
-            const categoryCount = importedConfig.categories.length;
-            const assignmentCount = Object.keys(
-                importedConfig.assignments
-            ).length;
-            const confirmed = confirmAction(
-                "Import configuration",
-                "Replace the current categories and assignments with " +
-                `the configuration from “${file.name}”?\n\n` +
-                `${categoryCount} user categor${
-                    categoryCount === 1 ? "y" : "ies"
-                } and ${assignmentCount} extension assignment${
-                    assignmentCount === 1 ? "" : "s"
-                } will be imported. Extension enabled/disabled states will not change.`
-            );
-            if (!confirmed) return;
-
-            const previousConfig = cloneConfig(config);
-            config.schemaVersion = importedConfig.schemaVersion;
-            config.categories = importedConfig.categories;
-            config.assignments = importedConfig.assignments;
-
-            if (!persistConfig()) {
-                config.schemaVersion = previousConfig.schemaVersion;
-                config.categories = previousConfig.categories;
-                config.assignments = previousConfig.assignments;
-                return;
-            }
-
-            selectedCategoryId = null;
-            clearOperationResults();
-            for (const row of rows) rebuildCategorySelect(row);
-            rebuildCategoryList();
-            renderRows();
-            keepMessage = true;
-            messageElement.textContent =
-                `Imported ${categoryCount} user categor${
-                    categoryCount === 1 ? "y" : "ies"
-                } and ${assignmentCount} assignment${
-                    assignmentCount === 1 ? "" : "s"
-                }. Extension states were left unchanged.`;
-        });
-
-        searchElement.addEventListener("input", renderRows);
-        sortElement.addEventListener("change", renderRows);
-        showFirefoxDisabledElement.addEventListener("change", renderRows);
-
-        resetElement.addEventListener("click", async () => {
-            keepMessage = true;
-            clearOperationResults();
-            messageElement.textContent = "Refreshing current extension states…";
-            setBusy(true);
-
-            try {
-                await refresh();
-                messageElement.textContent =
+                await this.refreshRows();
+                this.ui.message.textContent =
                     "Extension selections reset to the current live state.";
             } catch (error) {
-                reportError(error);
-                messageElement.textContent =
+                FirefoxCompat.reportError(error);
+                this.ui.message.textContent =
                     "Refresh failed. See Browser Console.";
             } finally {
-                setBusy(false);
+                this.setBusy(false);
             }
-        });
+        }
 
-        const performApply = async ({ reloadCurrentTab = false } = {}) => {
-            const changes = rows.filter(
+        async refreshFailedRow(row, { preserveDesired = true } = {}) {
+            try {
+                const current = await this.extensions.getById(row.id);
+                if (current) {
+                    this.updateRow(row, current, {
+                        preserveDesired,
+                        clearFailure: false
+                    });
+                }
+            } catch (error) {
+                FirefoxCompat.reportError(error);
+            }
+        }
+
+        failureFor(rowOrEntry, error) {
+            return {
+                name: rowOrEntry.name,
+                id: rowOrEntry.id,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
+
+        async performApply({ reloadCurrentTab = false } = {}) {
+            const changes = this.rows.filter(
                 row => row.checkbox.checked !== row.currentActive
             );
             if (!changes.length) return;
@@ -1746,10 +2038,10 @@ Last operation failed: ${row.lastError}`
                 ? window.gBrowser?.selectedBrowser ?? null
                 : null;
 
-            keepMessage = true;
-            clearOperationResults();
-            messageElement.textContent = `Applying ${changes.length} change(s)…`;
-            setBusy(true);
+            this.keepMessage = true;
+            this.clearOperationResults();
+            this.ui.message.textContent = `Applying ${changes.length} change(s)…`;
+            this.setBusy(true);
 
             const enabled = [];
             const disabled = [];
@@ -1760,142 +2052,82 @@ Last operation failed: ${row.lastError}`
                 const desiredActive = row.checkbox.checked;
 
                 try {
-                    const addon = await AddonManager.getAddonByID(row.id);
-                    if (!addon) {
-                        throw new Error("Extension is no longer installed.");
-                    }
+                    const result = await this.extensions.setActive(
+                        row.id,
+                        desiredActive
+                    );
 
-                    const previousActive = addon.isActive;
-
-                    if (desiredActive !== previousActive) {
-                        if (desiredActive) {
-                            if (
-                                addon.appDisabled ||
-                                !(addon.permissions & AddonManager.PERM_CAN_ENABLE)
-                            ) {
-                                throw new Error(
-                                    "Firefox does not permit enabling it."
-                                );
-                            }
-                            await addon.enable();
-                        } else {
-                            if (
-                                !(addon.permissions & AddonManager.PERM_CAN_DISABLE)
-                            ) {
-                                throw new Error(
-                                    "Firefox does not permit disabling it."
-                                );
-                            }
-                            await addon.disable();
-                        }
-                    }
-
-                    const updated = await AddonManager.getAddonByID(row.id);
-                    if (!updated) {
-                        throw new Error("Extension disappeared afterward.");
-                    }
-                    if (updated.isActive !== desiredActive) {
-                        throw new Error(
-                            `Firefox reported the extension as ${
-                                updated.isActive ? "enabled" : "disabled"
-                            } after the operation.`
-                        );
-                    }
-
-                    if (previousActive !== updated.isActive) {
+                    if (result.changed) {
                         undoEntries.push({
                             id: row.id,
                             name: row.name,
-                            active: previousActive
+                            active: result.previousActive
                         });
-                        (updated.isActive ? enabled : disabled).push(row.name);
+                        (result.updated.isActive ? enabled : disabled).push(row.name);
                     }
 
-                    updateRow(row, updated);
+                    this.updateRow(row, result.updated);
                 } catch (error) {
-                    const failure = {
-                        name: row.name,
-                        id: row.id,
-                        error: error instanceof Error
-                            ? error.message
-                            : String(error)
-                    };
+                    const failure = this.failureFor(row, error);
                     failures.push(failure);
-
-                    try {
-                        const current = await AddonManager.getAddonByID(row.id);
-                        if (current) {
-                            updateRow(row, current, {
-                                preserveDesired: true,
-                                clearFailure: false
-                            });
-                        }
-                    } catch (refreshError) {
-                        reportError(refreshError);
-                    }
-
-                    markRowFailure(row, failure.error);
+                    await this.refreshFailedRow(row);
+                    this.markRowFailure(row, failure.error);
                 }
             }
 
             if (undoEntries.length) {
-                lastApplySnapshot = {
+                this.setUndoSnapshot({
                     createdAt: Date.now(),
                     entries: undoEntries
-                };
+                });
             }
 
-            setBusy(false);
-            showOperationResults({ enabled, disabled, failures });
+            this.setBusy(false);
+            this.showOperationResults({ enabled, disabled, failures });
 
             const applied = enabled.length + disabled.length;
             if (failures.length) {
-                messageElement.textContent =
+                this.ui.message.textContent =
                     `${applied} applied; ${failures.length} failed. ` +
                     "Failed changes remain pending.";
                 console.table(failures);
             } else if (applied) {
-                messageElement.textContent =
+                this.ui.message.textContent =
                     `${enabled.length} enabled; ${disabled.length} disabled.`;
             } else {
-                messageElement.textContent =
+                this.ui.message.textContent =
                     "No extension state changes were necessary.";
             }
 
-            renderRows();
+            this.renderRows();
 
             if (reloadCurrentTab && applied > 0) {
                 try {
-                    if (!browserToReload || typeof browserToReload.reload !== "function") {
+                    if (
+                        !browserToReload ||
+                        typeof browserToReload.reload !== "function"
+                    ) {
                         throw new Error("No reloadable current tab was found.");
                     }
                     browserToReload.reload();
-                    messageElement.textContent += " Current tab reloaded.";
+                    this.ui.message.textContent += " Current tab reloaded.";
                 } catch (error) {
-                    reportError(error);
-                    messageElement.textContent +=
+                    FirefoxCompat.reportError(error);
+                    this.ui.message.textContent +=
                         " The current tab could not be reloaded.";
                 }
             }
-        };
+        }
 
-        applyElement.addEventListener("click", () => {
-            performApply().catch(reportError);
-        });
-
-        applyReloadElement.addEventListener("click", () => {
-            performApply({ reloadCurrentTab: true }).catch(reportError);
-        });
-
-        undoElement.addEventListener("click", async () => {
-            const snapshot = lastApplySnapshot;
+        async undoLastApply() {
+            const snapshot = this.getUndoSnapshot();
             if (!snapshot?.entries?.length) return;
 
-            keepMessage = true;
-            clearOperationResults();
-            messageElement.textContent =
+            this.keepMessage = true;
+            this.clearOperationResults();
+            this.ui.message.textContent =
                 `Restoring ${snapshot.entries.length} previous state(s)…`;
-            setBusy(true);
+            this.setBusy(true);
 
             const enabled = [];
             const disabled = [];
@@ -1903,103 +2135,48 @@ Last operation failed: ${row.lastError}`
             const remainingEntries = [];
 
             for (const entry of snapshot.entries) {
-                const row = rows.find(candidate => candidate.id === entry.id);
+                const row = this.rows.find(candidate => candidate.id === entry.id);
                 const hadPendingSelection = Boolean(
                     row && row.checkbox.checked !== row.currentActive
                 );
 
                 try {
-                    const addon = await AddonManager.getAddonByID(entry.id);
-                    if (!addon) {
-                        throw new Error("Extension is no longer installed.");
-                    }
-
-                    const previousActive = addon.isActive;
-
-                    if (previousActive !== entry.active) {
-                        if (entry.active) {
-                            if (
-                                addon.appDisabled ||
-                                !(addon.permissions & AddonManager.PERM_CAN_ENABLE)
-                            ) {
-                                throw new Error(
-                                    "Firefox does not permit enabling it."
-                                );
-                            }
-                            await addon.enable();
-                        } else {
-                            if (
-                                !(addon.permissions & AddonManager.PERM_CAN_DISABLE)
-                            ) {
-                                throw new Error(
-                                    "Firefox does not permit disabling it."
-                                );
-                            }
-                            await addon.disable();
-                        }
-                    }
-
-                    const updated = await AddonManager.getAddonByID(entry.id);
-                    if (!updated) {
-                        throw new Error("Extension disappeared afterward.");
-                    }
-                    if (updated.isActive !== entry.active) {
-                        throw new Error(
-                            `Firefox reported the extension as ${
-                                updated.isActive ? "enabled" : "disabled"
-                            } after the undo operation.`
-                        );
-                    }
-
-                    if (previousActive !== updated.isActive) {
-                        (updated.isActive ? enabled : disabled).push(entry.name);
+                    const result = await this.extensions.setActive(
+                        entry.id,
+                        entry.active
+                    );
+                    if (result.changed) {
+                        (result.updated.isActive ? enabled : disabled).push(entry.name);
                     }
                     if (row) {
-                        updateRow(row, updated, {
+                        this.updateRow(row, result.updated, {
                             preserveDesired: hadPendingSelection
                         });
                     }
                 } catch (error) {
-                    const failure = {
-                        name: entry.name,
-                        id: entry.id,
-                        error: error instanceof Error
-                            ? error.message
-                            : String(error)
-                    };
+                    const failure = this.failureFor(entry, error);
                     failures.push(failure);
                     remainingEntries.push(entry);
 
                     if (row) {
-                        try {
-                            const current = await AddonManager.getAddonByID(entry.id);
-                            if (current) {
-                                updateRow(row, current, {
-                                    preserveDesired: true,
-                                    clearFailure: false
-                                });
-                            }
-                        } catch (refreshError) {
-                            reportError(refreshError);
-                        }
-
-                        if (!hadPendingSelection) {
-                            row.checkbox.checked = entry.active;
-                        }
-                        markRowFailure(row, failure.error);
+                        await this.refreshFailedRow(row);
+                        if (!hadPendingSelection) row.checkbox.checked = entry.active;
+                        this.markRowFailure(row, failure.error);
                     }
                 }
             }
 
-            lastApplySnapshot = remainingEntries.length
-                ? { ...snapshot, entries: remainingEntries }
-                : null;
+            this.setUndoSnapshot(
+                remainingEntries.length
+                    ? { ...snapshot, entries: remainingEntries }
+                    : null
+            );
 
-            setBusy(false);
-            showOperationResults({ enabled, disabled, failures });
+            this.setBusy(false);
+            this.showOperationResults({ enabled, disabled, failures });
 
             const restored = enabled.length + disabled.length;
-            messageElement.textContent = failures.length
+            this.ui.message.textContent = failures.length
                 ? `${restored} restored; ${failures.length} failed. ` +
                     "Failed undo changes remain available for retry."
                 : restored
@@ -2007,42 +2184,117 @@ Last operation failed: ${row.lastError}`
                     : "The previous extension states were already restored.";
 
             if (failures.length) console.table(failures);
-            renderRows();
-        });
+            this.renderRows();
+        }
+    }
 
-        const handleClose = () => {
-            if (!busy) close();
-        };
+    class SwitchboardController {
+        constructor() {
+            this.configStore = new ConfigStore(FirefoxCompat.preferences);
+            this.extensionService = new ExtensionService(
+                FirefoxCompat.AddonManager
+            );
+            this.panel = null;
+            this.lastApplySnapshot = null;
+        }
 
-        closeElement.addEventListener("click", handleClose);
-        overlay.addEventListener("click", event => {
-            if (event.target === overlay) handleClose();
-        });
-        overlay.addEventListener("keydown", event => {
-            if (event.key === "Escape") handleClose();
-        });
+        ensureWidget() {
+            const existingWidget = FirefoxCompat.CustomizableUI.getWidget(
+                APP.WIDGET_ID
+            );
 
-        rebuildCategoryList();
-        renderRows();
-        searchElement.focus();
-    };
+            if (
+                existingWidget?.provider ===
+                FirefoxCompat.CustomizableUI.PROVIDER_API
+            ) {
+                return;
+            }
 
-    const destroy = () => {
-        close();
-        lastApplySnapshot = null;
-        document.getElementById(STYLE_ID)?.remove();
-        delete window.ExtensionSwitchboard;
-    };
+            FirefoxCompat.CustomizableUI.createWidget({
+                id: APP.WIDGET_ID,
+                type: "button",
+                defaultArea: FirefoxCompat.CustomizableUI.AREA_NAVBAR,
+                removable: true,
+                label: "Extension Switchboard",
+                tooltiptext: "Enable or disable Firefox extensions",
+                onCommand(event) {
+                    // ownerDocument.defaultView is the working path on current Firefox.
+                    const win =
+                        event?.target?.ownerDocument?.defaultView ??
+                        event?.currentTarget?.ownerDocument?.defaultView ??
+                        event?.view;
 
-    ensureStyle();
-    ensureWidget();
+                    if (!win?.ExtensionSwitchboard) {
+                        FirefoxCompat.reportError(new Error(
+                            "Could not locate Extension Switchboard in the " +
+                            "browser window that received the command."
+                        ));
+                        return;
+                    }
+
+                    win.ExtensionSwitchboard.open().catch(
+                        FirefoxCompat.reportError
+                    );
+                }
+            });
+        }
+
+        async open() {
+            this.close();
+            const categories = new CategoryManager(
+                this.configStore,
+                this.configStore.load()
+            );
+
+            const panel = new SwitchboardPanel({
+                configStore: this.configStore,
+                categoryManager: categories,
+                extensionService: this.extensionService,
+                getUndoSnapshot: () => this.lastApplySnapshot,
+                setUndoSnapshot: snapshot => {
+                    this.lastApplySnapshot = snapshot;
+                },
+                onClose: () => this.close()
+            });
+
+            this.panel = panel;
+            try {
+                await panel.mount();
+            } catch (error) {
+                panel.close();
+                this.panel = null;
+                throw error;
+            }
+        }
+
+        close() {
+            this.panel?.close();
+            this.panel = null;
+            document.getElementById(APP.PANEL_ID)?.remove();
+        }
+
+        destroy() {
+            this.close();
+            this.lastApplySnapshot = null;
+            StyleManager.remove();
+            delete window.ExtensionSwitchboard;
+        }
+
+        initialize() {
+            StyleManager.ensure();
+            this.ensureWidget();
+        }
+    }
+
+    const controller = new SwitchboardController();
+    controller.initialize();
 
     window.ExtensionSwitchboard = {
-        version: VERSION,
-        open,
-        close,
-        destroy
+        version: APP.VERSION,
+        open: () => controller.open(),
+        close: () => controller.close(),
+        destroy: () => controller.destroy()
     };
 
-    console.log(`Extension Switchboard ${VERSION} loaded.`);
+    console.log(`Extension Switchboard ${APP.VERSION} loaded.`);
 })();
