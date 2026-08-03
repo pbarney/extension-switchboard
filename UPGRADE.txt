@@ -1,0 +1,30 @@
+Extension Switchboard 0.2.0
+===========================
+
+UPGRADE FROM 0.1.x
+------------------
+1. Close Firefox completely.
+2. Replace this profile file:
+
+   <Firefox profile>\chrome\ExtensionSwitchboard.uc.js
+
+   with the ExtensionSwitchboard.uc.js supplied in this package.
+3. Restart Firefox.
+
+The existing firefox.cfg and autoconfig.js do not need to be changed.
+
+NEW IN 0.2.0
+------------
+- User-created categories: create, rename, and delete.
+- Each extension can be assigned to exactly one category.
+- Built-in Uncategorized category.
+- Category checkboxes enable/disable all category members as pending changes.
+- Category names act as filters.
+- Per-extension category selector.
+- Persistent category data stored in the profile preference:
+
+  extensionSwitchboard.config
+
+Deleting a category moves its assigned extensions to Uncategorized.
+Category assignments are saved immediately.
+Extension enable/disable changes still require the Apply changes button.
