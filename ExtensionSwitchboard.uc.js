@@ -9,12 +9,14 @@
  * - Enables/disables an entire category while retaining individual control.
  * - Stores categories and assignments in the Firefox profile preferences.
  * - Summarizes each extension's current site-access scope.
+ * - Reports batch-operation results, retains failed changes, and supports undo.
+ * - Can reload the current tab after applying extension changes.
  */
 
 (() => {
     "use strict";
 
-    const VERSION = "0.3.1";
+    const VERSION = "0.4.0";
     const WIDGET_ID = "extension-switchboard-button";
     const PANEL_ID = "extension-switchboard-panel";
     const STYLE_ID = "extension-switchboard-style";
@@ -187,9 +189,31 @@
             #${PANEL_ID} .sw-footer {
                 display: flex;
                 gap: 12px;
-                align-items: center;
+                align-items: flex-start;
                 justify-content: space-between;
             }
+            #${PANEL_ID} .sw-feedback {
+                min-width: 0;
+                flex: 1 1 auto;
+            }
+            #${PANEL_ID} .sw-results[hidden] { display: none; }
+            #${PANEL_ID} .sw-results {
+                max-height: 170px;
+                overflow: auto;
+                margin-top: 6px;
+                font-size: 11px;
+            }
+            #${PANEL_ID} .sw-results summary {
+                cursor: pointer;
+                font-weight: 600;
+            }
+            #${PANEL_ID} .sw-result-group { margin-top: 6px; }
+            #${PANEL_ID} .sw-result-title { font-weight: 600; }
+            #${PANEL_ID} .sw-result-list {
+                margin: 2px 0 0 18px;
+                padding: 0;
+            }
+            #${PANEL_ID} .sw-result-list li { margin-block: 2px; }
             #${PANEL_ID} h1,
             #${PANEL_ID} h2 { margin: 0; }
             #${PANEL_ID} h1 { font-size: 18px; }
@@ -312,6 +336,10 @@
             #${PANEL_ID} .sw-row.changed {
                 background: color-mix(in srgb, AccentColor 17%, transparent);
             }
+            #${PANEL_ID} .sw-row.apply-failed .sw-scope {
+                font-weight: 600;
+                opacity: .9;
+            }
             #${PANEL_ID} .sw-name {
                 overflow: hidden;
                 font-weight: 600;
@@ -331,7 +359,13 @@
                 min-width: 0;
                 min-height: 30px;
             }
-            #${PANEL_ID} .sw-actions { display: flex; gap: 8px; }
+            #${PANEL_ID} .sw-actions {
+                display: flex;
+                flex: 0 0 auto;
+                flex-wrap: wrap;
+                gap: 8px;
+                justify-content: flex-end;
+            }
             #${PANEL_ID} button {
                 min-height: 32px;
                 padding: 5px 12px;
@@ -452,6 +486,9 @@
 
         return window.confirm(message);
     };
+
+    // One level of undo is retained for the lifetime of this browser window.
+    let lastApplySnapshot = null;
 
     const open = async () => {
         ensureStyle();
@@ -595,16 +632,47 @@
         main.append(categoriesArea, extensionArea);
 
         const footer = createHtmlElement("div", { className: "sw-footer" });
+        const feedbackElement = createHtmlElement("div", {
+            className: "sw-feedback"
+        });
         const messageElement = createHtmlElement("div", {
             className: "sw-message sw-small",
             text: "No unapplied changes."
         });
+        const resultsElement = createHtmlElement("details", {
+            className: "sw-results"
+        });
+        resultsElement.hidden = true;
+        const resultsSummaryElement = createHtmlElement("summary", {
+            text: "Operation details"
+        });
+        const resultsBodyElement = createHtmlElement("div", {
+            className: "sw-results-body"
+        });
+        resultsElement.append(resultsSummaryElement, resultsBodyElement);
+        feedbackElement.append(messageElement, resultsElement);
+
         const actions = createHtmlElement("div", { className: "sw-actions" });
         const resetElement = createHtmlElement("button", {
             className: "sw-reset",
             text: "Reset",
             attributes: { type: "button" }
         });
+        const undoElement = createHtmlElement("button", {
+            className: "sw-undo",
+            text: "Undo last apply",
+            attributes: {
+                type: "button",
+                title: "Restore the extension states from immediately before the last successful Apply operation"
+            }
+        });
+        undoElement.disabled = true;
+        const applyReloadElement = createHtmlElement("button", {
+            className: "sw-apply-reload",
+            text: "Apply and reload tab",
+            attributes: { type: "button" }
+        });
+        applyReloadElement.disabled = true;
         const applyElement = createHtmlElement("button", {
             className: "sw-apply",
             text: "Apply changes",
@@ -612,8 +680,13 @@
         });
         applyElement.disabled = true;
 
-        actions.append(resetElement, applyElement);
-        footer.append(messageElement, actions);
+        actions.append(
+            resetElement,
+            undoElement,
+            applyReloadElement,
+            applyElement
+        );
+        footer.append(feedbackElement, actions);
         panel.append(header, toolbar, main, footer);
         overlay.append(panel);
         document.documentElement.append(overlay);
@@ -622,6 +695,54 @@
         let keepMessage = false;
         const rows = [];
         const categoryControls = [];
+
+        const clearOperationResults = () => {
+            resultsElement.hidden = true;
+            resultsElement.open = false;
+            resultsBodyElement.replaceChildren();
+        };
+
+        const appendResultGroup = (title, entries, formatter = value => value) => {
+            if (!entries.length) return;
+
+            const group = createHtmlElement("div", {
+                className: "sw-result-group"
+            });
+            const heading = createHtmlElement("div", {
+                className: "sw-result-title",
+                text: `${title} (${entries.length})`
+            });
+            const list = createHtmlElement("ul", {
+                className: "sw-result-list"
+            });
+
+            for (const entry of entries) {
+                list.append(createHtmlElement("li", {
+                    text: formatter(entry)
+                }));
+            }
+
+            group.append(heading, list);
+            resultsBodyElement.append(group);
+        };
+
+        const showOperationResults = ({ enabled, disabled, failures }) => {
+            resultsBodyElement.replaceChildren();
+            appendResultGroup("Enabled", enabled);
+            appendResultGroup("Disabled", disabled);
+            appendResultGroup(
+                "Failed",
+                failures,
+                failure => `${failure.name}: ${failure.error}`
+            );
+
+            const total = enabled.length + disabled.length + failures.length;
+            resultsElement.hidden = total === 0;
+            resultsElement.open = failures.length > 0;
+            resultsSummaryElement.textContent = failures.length
+                ? `Operation details · ${failures.length} failed`
+                : "Operation details";
+        };
 
         const categoryById = categoryId => {
             if (categoryId === UNCATEGORIZED_ID) {
@@ -760,16 +881,28 @@
                 row => row.checkbox.checked !== row.currentActive
             ).length;
             const visible = rows.filter(row => !row.element.hidden).length;
+            const changeLabel = changed === 1 ? "change" : "changes";
+            const undoCount = lastApplySnapshot?.entries?.length ?? 0;
 
             summaryElement.textContent =
                 `${rows.length} extensions · ${active} active · ` +
                 `${config.categories.length + 1} categories · ` +
                 `${firefoxDisabled} Firefox-disabled`;
             shownElement.textContent = `${visible} shown`;
+
             applyElement.disabled = busy || changed === 0;
+            applyReloadElement.disabled = busy || changed === 0;
             applyElement.textContent = changed
-                ? `Apply changes (${changed})`
+                ? `Apply ${changed} ${changeLabel}`
                 : "Apply changes";
+            applyReloadElement.textContent = changed
+                ? `Apply ${changed} ${changeLabel} and reload tab`
+                : "Apply and reload tab";
+
+            undoElement.disabled = busy || undoCount === 0;
+            undoElement.textContent = undoCount
+                ? `Undo last apply (${undoCount})`
+                : "Undo last apply";
 
             if (!busy && changed === 0 && !keepMessage) {
                 messageElement.textContent = "No unapplied changes.";
@@ -819,19 +952,49 @@
             updateCheckboxDescription(row);
         };
 
-        const updateRow = (row, addon) => {
+        const updateRowScope = row => {
+            const parts = [];
+
+            if (row.appDisabled) parts.push("Disabled by Firefox");
+            parts.push(`Site access: ${row.siteAccess.label}`);
+            if (row.lastError) parts.push(`Operation failed: ${row.lastError}`);
+
+            row.scope.textContent = parts.join(" · ");
+            row.scope.title = row.lastError
+                ? `${row.siteAccess.title}
+
+Last operation failed: ${row.lastError}`
+                : row.siteAccess.title;
+            row.element.classList.toggle("apply-failed", Boolean(row.lastError));
+        };
+
+        const updateRow = (
+            row,
+            addon,
+            { preserveDesired = false, clearFailure = true } = {}
+        ) => {
             row.currentActive = addon.isActive;
             row.currentUserDisabled = addon.userDisabled;
             row.appDisabled = addon.appDisabled;
             row.locked = !canToggle(addon);
             row.siteAccess = getSiteAccess(addon);
-            row.checkbox.checked = addon.isActive;
+
+            if (!preserveDesired) {
+                row.checkbox.checked = addon.isActive;
+            }
+            if (clearFailure) {
+                row.lastError = null;
+            }
+
             row.checkbox.disabled = busy || row.locked;
-            row.scope.textContent = addon.appDisabled
-                ? `Disabled by Firefox · Site access: ${row.siteAccess.label}`
-                : `Site access: ${row.siteAccess.label}`;
-            row.scope.title = row.siteAccess.title;
+            updateRowScope(row);
             updateRowStateClasses(row);
+            updateRowChangeState(row);
+        };
+
+        const markRowFailure = (row, error) => {
+            row.lastError = error instanceof Error ? error.message : String(error);
+            updateRowScope(row);
             updateRowChangeState(row);
         };
 
@@ -890,6 +1053,9 @@
             sortElement.disabled = value;
             showFirefoxDisabledElement.disabled = value;
             resetElement.disabled = value;
+            undoElement.disabled = value;
+            applyReloadElement.disabled = value;
+            applyElement.disabled = value;
             closeElement.disabled = value;
 
             for (const row of rows) {
@@ -951,6 +1117,7 @@
                 appDisabled: addon.appDisabled,
                 locked: !canToggle(addon),
                 siteAccess,
+                lastError: null,
                 checkbox,
                 categorySelect,
                 scope,
@@ -962,6 +1129,8 @@
             rebuildCategorySelect(row);
 
             checkbox.addEventListener("change", () => {
+                row.lastError = null;
+                updateRowScope(row);
                 updateRowChangeState(row);
                 keepMessage = false;
                 updateCategoryStates();
@@ -1112,6 +1281,8 @@
                             !row.locked
                         ) {
                             row.checkbox.checked = desiredState;
+                            row.lastError = null;
+                            updateRowScope(row);
                             updateRowChangeState(row);
                         }
                     }
@@ -1295,6 +1466,7 @@
 
         resetElement.addEventListener("click", async () => {
             keepMessage = true;
+            clearOperationResults();
             messageElement.textContent = "Refreshing current extension states…";
             setBusy(true);
 
@@ -1311,28 +1483,39 @@
             }
         });
 
-        applyElement.addEventListener("click", async () => {
+        const performApply = async ({ reloadCurrentTab = false } = {}) => {
             const changes = rows.filter(
                 row => row.checkbox.checked !== row.currentActive
             );
             if (!changes.length) return;
 
+            const browserToReload = reloadCurrentTab
+                ? window.gBrowser?.selectedBrowser ?? null
+                : null;
+
             keepMessage = true;
+            clearOperationResults();
             messageElement.textContent = `Applying ${changes.length} change(s)…`;
             setBusy(true);
 
-            let applied = 0;
+            const enabled = [];
+            const disabled = [];
             const failures = [];
+            const undoEntries = [];
 
             for (const row of changes) {
+                const desiredActive = row.checkbox.checked;
+
                 try {
                     const addon = await AddonManager.getAddonByID(row.id);
                     if (!addon) {
                         throw new Error("Extension is no longer installed.");
                     }
 
-                    if (row.checkbox.checked !== addon.isActive) {
-                        if (row.checkbox.checked) {
+                    const previousActive = addon.isActive;
+
+                    if (desiredActive !== previousActive) {
+                        if (desiredActive) {
                             if (
                                 addon.appDisabled ||
                                 !(addon.permissions & AddonManager.PERM_CAN_ENABLE)
@@ -1358,26 +1541,217 @@
                     if (!updated) {
                         throw new Error("Extension disappeared afterward.");
                     }
+                    if (updated.isActive !== desiredActive) {
+                        throw new Error(
+                            `Firefox reported the extension as ${
+                                updated.isActive ? "enabled" : "disabled"
+                            } after the operation.`
+                        );
+                    }
+
+                    if (previousActive !== updated.isActive) {
+                        undoEntries.push({
+                            id: row.id,
+                            name: row.name,
+                            active: previousActive
+                        });
+                        (updated.isActive ? enabled : disabled).push(row.name);
+                    }
 
                     updateRow(row, updated);
-                    applied++;
                 } catch (error) {
-                    failures.push({
+                    const failure = {
                         name: row.name,
                         id: row.id,
-                        error: error.message
-                    });
+                        error: error instanceof Error
+                            ? error.message
+                            : String(error)
+                    };
+                    failures.push(failure);
 
-                    const current = await AddonManager.getAddonByID(row.id);
-                    if (current) updateRow(row, current);
+                    try {
+                        const current = await AddonManager.getAddonByID(row.id);
+                        if (current) {
+                            updateRow(row, current, {
+                                preserveDesired: true,
+                                clearFailure: false
+                            });
+                        }
+                    } catch (refreshError) {
+                        reportError(refreshError);
+                    }
+
+                    markRowFailure(row, failure.error);
                 }
             }
 
+            if (undoEntries.length) {
+                lastApplySnapshot = {
+                    createdAt: Date.now(),
+                    entries: undoEntries
+                };
+            }
+
             setBusy(false);
+            showOperationResults({ enabled, disabled, failures });
+
+            const applied = enabled.length + disabled.length;
+            if (failures.length) {
+                messageElement.textContent =
+                    `${applied} applied; ${failures.length} failed. ` +
+                    "Failed changes remain pending.";
+                console.table(failures);
+            } else if (applied) {
+                messageElement.textContent =
+                    `${enabled.length} enabled; ${disabled.length} disabled.`;
+            } else {
+                messageElement.textContent =
+                    "No extension state changes were necessary.";
+            }
+
+            renderRows();
+
+            if (reloadCurrentTab && applied > 0) {
+                try {
+                    if (!browserToReload || typeof browserToReload.reload !== "function") {
+                        throw new Error("No reloadable current tab was found.");
+                    }
+                    browserToReload.reload();
+                    messageElement.textContent += " Current tab reloaded.";
+                } catch (error) {
+                    reportError(error);
+                    messageElement.textContent +=
+                        " The current tab could not be reloaded.";
+                }
+            }
+        };
+
+        applyElement.addEventListener("click", () => {
+            performApply().catch(reportError);
+        });
+
+        applyReloadElement.addEventListener("click", () => {
+            performApply({ reloadCurrentTab: true }).catch(reportError);
+        });
+
+        undoElement.addEventListener("click", async () => {
+            const snapshot = lastApplySnapshot;
+            if (!snapshot?.entries?.length) return;
+
+            keepMessage = true;
+            clearOperationResults();
+            messageElement.textContent =
+                `Restoring ${snapshot.entries.length} previous state(s)…`;
+            setBusy(true);
+
+            const enabled = [];
+            const disabled = [];
+            const failures = [];
+            const remainingEntries = [];
+
+            for (const entry of snapshot.entries) {
+                const row = rows.find(candidate => candidate.id === entry.id);
+                const hadPendingSelection = Boolean(
+                    row && row.checkbox.checked !== row.currentActive
+                );
+
+                try {
+                    const addon = await AddonManager.getAddonByID(entry.id);
+                    if (!addon) {
+                        throw new Error("Extension is no longer installed.");
+                    }
+
+                    const previousActive = addon.isActive;
+
+                    if (previousActive !== entry.active) {
+                        if (entry.active) {
+                            if (
+                                addon.appDisabled ||
+                                !(addon.permissions & AddonManager.PERM_CAN_ENABLE)
+                            ) {
+                                throw new Error(
+                                    "Firefox does not permit enabling it."
+                                );
+                            }
+                            await addon.enable();
+                        } else {
+                            if (
+                                !(addon.permissions & AddonManager.PERM_CAN_DISABLE)
+                            ) {
+                                throw new Error(
+                                    "Firefox does not permit disabling it."
+                                );
+                            }
+                            await addon.disable();
+                        }
+                    }
+
+                    const updated = await AddonManager.getAddonByID(entry.id);
+                    if (!updated) {
+                        throw new Error("Extension disappeared afterward.");
+                    }
+                    if (updated.isActive !== entry.active) {
+                        throw new Error(
+                            `Firefox reported the extension as ${
+                                updated.isActive ? "enabled" : "disabled"
+                            } after the undo operation.`
+                        );
+                    }
+
+                    if (previousActive !== updated.isActive) {
+                        (updated.isActive ? enabled : disabled).push(entry.name);
+                    }
+                    if (row) {
+                        updateRow(row, updated, {
+                            preserveDesired: hadPendingSelection
+                        });
+                    }
+                } catch (error) {
+                    const failure = {
+                        name: entry.name,
+                        id: entry.id,
+                        error: error instanceof Error
+                            ? error.message
+                            : String(error)
+                    };
+                    failures.push(failure);
+                    remainingEntries.push(entry);
+
+                    if (row) {
+                        try {
+                            const current = await AddonManager.getAddonByID(entry.id);
+                            if (current) {
+                                updateRow(row, current, {
+                                    preserveDesired: true,
+                                    clearFailure: false
+                                });
+                            }
+                        } catch (refreshError) {
+                            reportError(refreshError);
+                        }
+
+                        if (!hadPendingSelection) {
+                            row.checkbox.checked = entry.active;
+                        }
+                        markRowFailure(row, failure.error);
+                    }
+                }
+            }
+
+            lastApplySnapshot = remainingEntries.length
+                ? { ...snapshot, entries: remainingEntries }
+                : null;
+
+            setBusy(false);
+            showOperationResults({ enabled, disabled, failures });
+
+            const restored = enabled.length + disabled.length;
             messageElement.textContent = failures.length
-                ? `${applied} applied; ${failures.length} failed. ` +
-                    "See Browser Console."
-                : `${applied} change(s) applied successfully.`;
+                ? `${restored} restored; ${failures.length} failed. ` +
+                    "Failed undo changes remain available for retry."
+                : restored
+                    ? `${restored} extension state(s) restored.`
+                    : "The previous extension states were already restored.";
 
             if (failures.length) console.table(failures);
             renderRows();
@@ -1402,6 +1776,7 @@
 
     const destroy = () => {
         close();
+        lastApplySnapshot = null;
         document.getElementById(STYLE_ID)?.remove();
         delete window.ExtensionSwitchboard;
     };

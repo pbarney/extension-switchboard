@@ -1,49 +1,24 @@
-Extension Switchboard 0.3.0
-===========================
+Extension Switchboard v0.4.0
+============================
 
-UPGRADE FROM 0.2.0
-------------------
-1. Close Firefox completely.
-2. Replace this profile file:
+Upgrade
+-------
+Replace the existing profile file:
 
-   <Firefox profile>\chrome\ExtensionSwitchboard.uc.js
+  <Firefox profile>\chrome\ExtensionSwitchboard.uc.js
 
-   with the ExtensionSwitchboard.uc.js supplied in this package.
-3. Restart Firefox.
+with ExtensionSwitchboard-v0.4.0.uc.js.txt, removing only the final .txt
+suffix. Completely restart Firefox. No changes are required to firefox.cfg or
+autoconfig.js.
 
-The existing firefox.cfg and autoconfig.js do not need to be changed.
-
-Your existing categories and assignments are fully compatible and are retained.
-
-NEW IN 0.3.0
-------------
-- Adds current-state row classes for CSS customization:
-
-  .sw-row.active
-  .sw-row.user-disabled
-  .sw-row.firefox-disabled
-
-  More than one class may apply to the same row.
-
-- After creating a category, automatically filters to Uncategorized so
-  extensions can be assigned to the new category immediately.
-- Replaces the visible extension ID with a concise site-access summary:
-
-  All sites
-  Limited sites
-  On demand
-  No site access
-  Site access unavailable
-
-- Keeps extension IDs searchable and exposes each ID in the extension-name
-  tooltip.
-- Removes the redundant status column.
-- Explains Firefox-disabled extensions beside the extension name and through
-  the disabled checkbox tooltip.
-- Keeps category selectors aligned in a fixed grid column.
-
-SITE-ACCESS NOTE
-----------------
-The summary describes the host access currently exposed by Firefox. "On demand"
-means the extension uses activeTab-style temporary access after a user action.
-It does not attempt to list every matched site or URL pattern.
+Changes
+-------
+- Apply buttons show the number of pending changes.
+- Added "Apply and reload tab".
+- Apply results list extensions enabled, disabled, and failed.
+- Failed changes remain pending and visibly marked for correction or retry.
+- Added one-level "Undo last apply" for successfully changed extensions.
+- A partial undo retains only failed undo entries so it can be retried.
+- New pending selections made after Apply are preserved when Undo runs.
+- Undo history lasts for the lifetime of the Firefox browser window and is not
+  persisted across a Firefox restart.
