@@ -14,7 +14,7 @@
     "use strict";
 
     const APP = Object.freeze({
-        VERSION: "0.6.1",
+        VERSION: "0.7.0",
         WIDGET_ID: "extension-switchboard-button",
         PANEL_ID: "extension-switchboard-panel",
         STYLE_ID: "extension-switchboard-style",
@@ -182,8 +182,8 @@
             }
             #${APP.PANEL_ID} * { box-sizing: border-box; }
             #${APP.PANEL_ID} .sw-panel {
-                width: min(980px, calc(100vw - 40px));
-                height: min(820px, calc(100vh - 40px));
+                width: min(780px, calc(100vw - 40px));
+                height: min(700px, calc(100vh - 40px));
                 display: grid;
                 grid-template-rows: auto auto 1fr auto;
                 overflow: hidden;
@@ -251,14 +251,14 @@
                 gap: 10px 12px;
                 align-items: center;
             }
+            #${APP.PANEL_ID} .sw-show-firefox-disabled {
+                display: none !important;
+            }
             #${APP.PANEL_ID} .sw-shown {
-                height: -webkit-fill-available;
-                padding: 4px;
-                border: 1px solid var(--border-color-deemphasized);
-                border-radius: var(--border-radius-small);
-                background-color: #eee;
+                padding: 7px 8px;
+                border-radius: var(--border-radius-medium);
+                background-color: var(--button-background-color);
                 font-weight: 600;
-                line-height: 1.7;
             }
             #${APP.PANEL_ID} input[type="search"] {
                 flex: 1 1 320px;
@@ -310,12 +310,14 @@
                 padding-block: 5px;
             }
             #${APP.PANEL_ID} .sw-category-row {
+                position: relative;
                 display: grid;
-                grid-template-columns: 24px minmax(0, 1fr) auto;
+                grid-template-columns: 24px minmax(0, 1fr) auto 20px;
                 gap: 6px;
                 align-items: center;
                 min-height: 38px;
-                padding: 4px 10px;
+                padding-block: 4px;
+                padding-inline: 6px 2px;
             }
             #${APP.PANEL_ID} .sw-category-row:hover,
             #${APP.PANEL_ID} .sw-category-row.selected {
@@ -323,6 +325,51 @@
             }
             #${APP.PANEL_ID} .sw-category-row.selected {
                 box-shadow: inset 3px 0 AccentColor;
+            }
+            #${APP.PANEL_ID} .sw-category-row.dragging {
+                opacity: .55;
+            }
+            #${APP.PANEL_ID} .sw-category-row.drag-before::before,
+            #${APP.PANEL_ID} .sw-category-row.drag-after::after {
+                content: "";
+                position: absolute;
+                z-index: 1;
+                right: 8px;
+                left: 8px;
+                height: 2px;
+                border-radius: 2px;
+                background: AccentColor;
+                pointer-events: none;
+            }
+            #${APP.PANEL_ID} .sw-category-row.drag-before::before {
+                top: -1px;
+            }
+            #${APP.PANEL_ID} .sw-category-row.drag-after::after {
+                bottom: -1px;
+            }
+            #${APP.PANEL_ID} .sw-category-drag-handle,
+            #${APP.PANEL_ID} .sw-category-drag-spacer {
+                width: 20px;
+                min-height: 28px;
+            }
+            #${APP.PANEL_ID} .sw-category-drag-handle {
+                display: grid;
+                place-items: center;
+                opacity: .55;
+                cursor: grab;
+                font-size: 16px;
+                line-height: 1;
+                user-select: none;
+            }
+            #${APP.PANEL_ID} .sw-category-drag-handle:hover {
+                opacity: 1;
+            }
+            #${APP.PANEL_ID} .sw-category-drag-handle:active {
+                cursor: grabbing;
+            }
+            #${APP.PANEL_ID} .sw-category-drag-handle[aria-disabled="true"] {
+                opacity: .25;
+                cursor: not-allowed;
             }
             #${APP.PANEL_ID} .sw-category-name {
                 min-width: 0;
@@ -344,7 +391,7 @@
                 white-space: nowrap;
             }
             #${APP.PANEL_ID} .sw-all-row {
-                grid-template-columns: 24px minmax(0, 1fr) auto;
+                grid-template-columns: 24px 20px minmax(0, 1fr) auto;
             }
             #${APP.PANEL_ID} .sw-all-row .sw-all-spacer {
                 width: 16px;
@@ -399,6 +446,7 @@
             }
             #${APP.PANEL_ID} .sw-scope strong {
                 font-weight: 600;
+                color: var(--color-accent-primary);
             }
             #${APP.PANEL_ID} .sw-category-select {
                 width: 100%;
@@ -433,7 +481,7 @@
             @media (max-width: 760px) {
                 #${APP.PANEL_ID} .sw-panel {
                     width: calc(100vw - 20px);
-                    height: calc(100vh - 20px);
+                    height: min(700px, calc(100vh - 20px));
                 }
                 #${APP.PANEL_ID} .sw-main {
                     grid-template-columns: 200px minmax(0, 1fr);
@@ -765,6 +813,40 @@
             return category;
         }
 
+        move(categoryId, targetCategoryId, position = "before") {
+            if (!new Set(["before", "after"]).has(position)) {
+                throw new Error("The requested category position is invalid.");
+            }
+
+            const sourceIndex = this.config.categories.findIndex(
+                category => category.id === categoryId
+            );
+            const targetIndex = this.config.categories.findIndex(
+                category => category.id === targetCategoryId
+            );
+
+            if (sourceIndex < 0 || targetIndex < 0) {
+                throw new Error("One of the categories no longer exists.");
+            }
+            if (categoryId === targetCategoryId) return false;
+
+            const previousOrder = this.config.categories.map(
+                category => category.id
+            );
+            const [category] = this.config.categories.splice(sourceIndex, 1);
+            const adjustedTargetIndex = this.config.categories.findIndex(
+                item => item.id === targetCategoryId
+            );
+            const insertionIndex = adjustedTargetIndex +
+                (position === "after" ? 1 : 0);
+
+            this.config.categories.splice(insertionIndex, 0, category);
+
+            return this.config.categories.some(
+                (item, index) => item.id !== previousOrder[index]
+            );
+        }
+
         remove(categoryId) {
             const categoryIndex = this.config.categories.findIndex(
                 item => item.id === categoryId
@@ -942,6 +1024,7 @@
             this.busy = false;
             this.keepMessage = false;
             this.selectedCategoryId = null;
+            this.draggedCategoryId = null;
             this.rows = [];
             this.categoryControls = [];
             this.ui = {};
@@ -964,7 +1047,7 @@
         buildLayout() {
             const headingGroup = Dom.create("div", {
                 children: [
-                    Dom.create("h1", { text: "Extension Switchboard" }),
+                    Dom.create("h1", { text: `Extension Switchboard v${APP.VERSION}` }),
                     Dom.create("div", {
                         className: "sw-summary sw-small",
                         text: "Loading extensions…"
@@ -1028,12 +1111,11 @@
                 ]
             });
             const showUnavailable = Dom.create("input", {
-                className: "sw-show-firefox-disabled",
                 attributes: { type: "checkbox" },
                 properties: { checked: true }
             });
             const shown = Dom.create("div", {
-                className: "sw-shown sw-small"
+                className: "sw-shown"
             });
 
             const toolbar = Dom.create("div", {
@@ -1045,7 +1127,7 @@
                         children: [Dom.create("span", { text: "Sort:" }), sort]
                     }),
                     Dom.create("label", {
-                        className: "sw-control",
+                        className: "sw-control sw-show-firefox-disabled",
                         children: [
                             showUnavailable,
                             Dom.create("span", { text: "Show unavailable" })
@@ -1167,9 +1249,19 @@
             });
             const overlay = Dom.create("div", {
                 id: APP.PANEL_ID,
+                attributes: {
+                    tabindex: "-1"
+                },
                 children: [panel]
             });
             document.documentElement.append(overlay);
+
+            // focus on the overlay, defering by one animation frame to ensure the layout is finished
+            window.requestAnimationFrame(() => {
+                overlay.focus({
+                    preventScroll: true
+                });
+            });
 
             this.ui = {
                 overlay,
@@ -1286,21 +1378,8 @@
             }, { once: true });
 
             const siteAccess = this.extensions.getSiteAccess(addon);
-            const children = addon.appDisabled
-                ? [
-                    Dom.create("strong", { text: "Disabled by Firefox" }),
-                    document.createTextNode(" · Access: "),
-                    Dom.create("strong", { text: siteAccess.label })
-                ]
-                : [
-                    document.createTextNode("Access: "),
-                    Dom.create("strong", { text: siteAccess.label })
-                ];
-
             const scope = Dom.create("div", {
-                className: "sw-scope",
-                attributes: { title: siteAccess.title },
-                children
+                className: "sw-scope"
             });
 
             const categorySelect = Dom.create("select", {
@@ -1347,6 +1426,7 @@
                 element
             };
 
+            this.updateRowScope(row);
             this.updateRowStateClasses(row);
             this.updateRowChangeState(row);
             this.rebuildCategorySelect(row);
@@ -1606,12 +1686,29 @@
         }
 
         updateRowScope(row) {
-            const parts = [];
-            if (row.appDisabled) parts.push("Disabled by Firefox");
-            parts.push(`Access: ${row.siteAccess.label}`);
-            if (row.lastError) parts.push(`Operation failed: ${row.lastError}`);
+            const children = [];
 
-            row.scope.textContent = parts.join(" · ");
+            if (row.appDisabled) {
+                children.push(
+                    Dom.create("strong", { text: "Disabled by Firefox" }),
+                    document.createTextNode(" · ")
+                );
+            }
+
+            children.push(
+                document.createTextNode("Access: "),
+                Dom.create("strong", { text: row.siteAccess.label })
+            );
+
+            if (row.lastError) {
+                children.push(
+                    document.createTextNode(" · "),
+                    Dom.create("strong", { text: "Operation failed:" }),
+                    document.createTextNode(` ${row.lastError}`)
+                );
+            }
+
+            row.scope.replaceChildren(...children);
             row.scope.title = row.lastError
                 ? `${row.siteAccess.title}\n\nLast operation failed: ${row.lastError}`
                 : row.siteAccess.title;
@@ -1677,6 +1774,76 @@
             for (const row of this.rows) this.rebuildCategorySelect(row);
         }
 
+        clearCategoryDropIndicators(exceptElement = null) {
+            for (const control of this.categoryControls) {
+                if (control.element !== exceptElement) {
+                    control.element.classList.remove("drag-before", "drag-after");
+                }
+            }
+        }
+
+        clearCategoryDragState() {
+            this.draggedCategoryId = null;
+            for (const control of this.categoryControls) {
+                control.element.classList.remove(
+                    "dragging",
+                    "drag-before",
+                    "drag-after"
+                );
+            }
+        }
+
+        getCategoryDropPosition(event, element) {
+            const bounds = element.getBoundingClientRect();
+            return event.clientY < bounds.top + bounds.height / 2
+                ? "before"
+                : "after";
+        }
+
+        autoScrollCategoryList(event) {
+            const bounds = this.ui.categoryList.getBoundingClientRect();
+            const edgeSize = Math.min(36, bounds.height / 4);
+            const scrollAmount = 18;
+
+            if (event.clientY < bounds.top + edgeSize) {
+                this.ui.categoryList.scrollBy(0, -scrollAmount);
+            } else if (event.clientY > bounds.bottom - edgeSize) {
+                this.ui.categoryList.scrollBy(0, scrollAmount);
+            }
+        }
+
+        moveCategory(categoryId, targetCategoryId, position) {
+            const snapshot = this.categories.snapshot();
+            const categoryName = this.categories.getById(categoryId).name;
+            let moved;
+
+            try {
+                moved = this.categories.move(
+                    categoryId,
+                    targetCategoryId,
+                    position
+                );
+            } catch (error) {
+                FirefoxCompat.alert(error.message);
+                return;
+            }
+
+            if (!moved) return;
+
+            if (!this.persistOrRollback(snapshot)) {
+                this.rebuildAllCategorySelects();
+                this.rebuildCategoryList();
+                this.renderRows();
+                return;
+            }
+
+            this.rebuildAllCategorySelects();
+            this.rebuildCategoryList();
+            this.renderRows();
+            this.keepMessage = true;
+            this.ui.message.textContent = `Moved category “${categoryName}”.`;
+        }
+
         updateCategoryStates() {
             for (const control of this.categoryControls) {
                 const members = this.rows.filter(
@@ -1704,6 +1871,14 @@
                     this.selectedCategoryId === control.categoryId
                 );
                 control.nameButton.disabled = this.busy;
+
+                if (control.dragHandle) {
+                    control.dragHandle.draggable = !this.busy;
+                    control.dragHandle.setAttribute(
+                        "aria-disabled",
+                        String(this.busy)
+                    );
+                }
             }
 
             this.updateCategorySelectionControls();
@@ -1773,6 +1948,7 @@
         }
 
         rebuildCategoryList() {
+            this.clearCategoryDragState();
             this.ui.categoryList.replaceChildren();
             this.categoryControls.length = 0;
 
@@ -1794,7 +1970,8 @@
                     Dom.create("span", {
                         className: "sw-category-count",
                         text: String(this.rows.length)
-                    })
+                    }),
+                    Dom.create("span", { className: "sw-category-drag-spacer" })
                 ]
             });
             allRow.classList.toggle("selected", this.selectedCategoryId === null);
@@ -1808,6 +1985,22 @@
                         "aria-label": `Toggle category ${category.name}`
                     }
                 });
+                const dragHandle = category.builtIn
+                    ? Dom.create("span", {
+                        className: "sw-category-drag-spacer",
+                        attributes: { "aria-hidden": "true" }
+                    })
+                    : Dom.create("span", {
+                        className: "sw-category-drag-handle",
+                        text: "⠿",
+                        attributes: {
+                            role: "button",
+                            title: `Drag to reorder ${category.name}`,
+                            "aria-label": `Drag to reorder category ${category.name}`,
+                            "aria-disabled": String(this.busy)
+                        },
+                        properties: { draggable: !this.busy }
+                    });
                 const nameButton = Dom.button(category.name, {
                     className: "sw-category-name",
                     attributes: {
@@ -1819,7 +2012,7 @@
                 });
                 const element = Dom.create("div", {
                     className: "sw-category-row",
-                    children: [checkbox, nameButton, count]
+                    children: [checkbox, nameButton, count, dragHandle]
                 });
 
                 checkbox.addEventListener("change", () => {
@@ -1846,12 +2039,99 @@
                     this.renderRows();
                 });
 
+                if (!category.builtIn) {
+                    dragHandle.addEventListener("dragstart", event => {
+                        if (this.busy) {
+                            event.preventDefault();
+                            return;
+                        }
+
+                        this.draggedCategoryId = category.id;
+                        element.classList.add("dragging");
+
+                        if (event.dataTransfer) {
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", category.id);
+                            event.dataTransfer.setDragImage(element, 20, 20);
+                        }
+                    });
+
+                    dragHandle.addEventListener("dragend", () => {
+                        this.clearCategoryDragState();
+                    });
+
+                    element.addEventListener("dragover", event => {
+                        if (
+                            this.busy ||
+                            !this.draggedCategoryId ||
+                            this.draggedCategoryId === category.id
+                        ) {
+                            return;
+                        }
+
+                        event.preventDefault();
+                        if (event.dataTransfer) {
+                            event.dataTransfer.dropEffect = "move";
+                        }
+
+                        this.autoScrollCategoryList(event);
+                        const position = this.getCategoryDropPosition(
+                            event,
+                            element
+                        );
+                        this.clearCategoryDropIndicators(element);
+                        element.classList.toggle(
+                            "drag-before",
+                            position === "before"
+                        );
+                        element.classList.toggle(
+                            "drag-after",
+                            position === "after"
+                        );
+                    });
+
+                    element.addEventListener("dragleave", event => {
+                        if (
+                            event.relatedTarget &&
+                            element.contains(event.relatedTarget)
+                        ) {
+                            return;
+                        }
+
+                        element.classList.remove("drag-before", "drag-after");
+                    });
+
+                    element.addEventListener("drop", event => {
+                        if (
+                            this.busy ||
+                            !this.draggedCategoryId ||
+                            this.draggedCategoryId === category.id
+                        ) {
+                            return;
+                        }
+
+                        event.preventDefault();
+                        const draggedCategoryId = this.draggedCategoryId;
+                        const position = this.getCategoryDropPosition(
+                            event,
+                            element
+                        );
+                        this.clearCategoryDragState();
+                        this.moveCategory(
+                            draggedCategoryId,
+                            category.id,
+                            position
+                        );
+                    });
+                }
+
                 this.ui.categoryList.append(element);
                 this.categoryControls.push({
                     categoryId: category.id,
                     checkbox,
                     nameButton,
                     count,
+                    dragHandle: category.builtIn ? null : dragHandle,
                     element
                 });
             }

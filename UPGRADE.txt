@@ -1,54 +1,16 @@
-Extension Switchboard v0.6.0
-============================
+Extension Switchboard v0.7.0
 
-Internal architecture and maintainability refactor based on v0.5.0.
-The user interface, configuration preference, import/export format, and
-category schema remain compatible.
+Added manual category ordering by drag and drop.
 
-Architecture
-------------
-- FirefoxCompat centralizes Firefox-only APIs and compatibility fallbacks.
-- ConfigStore owns preference persistence, sanitization, cloning, and
-  import/export validation.
-- CategoryManager owns category validation, CRUD, and one-category-per-
-  extension assignment rules.
-- ExtensionService owns extension enumeration, permission checks, site-access
-  classification, and enable/disable operations.
-- SwitchboardPanel owns DOM construction, rendering, events, and user feedback.
-- SwitchboardController owns startup, toolbar registration, panel lifetime,
-  and the one-level undo snapshot.
+Changes:
+- User-created categories now show a dedicated drag handle.
+- Dragging above or below another user category changes its saved position.
+- All extensions and Uncategorized remain fixed at the top.
+- Drop-position indicators show where a category will be inserted.
+- The category list auto-scrolls when dragging near its top or bottom edge.
+- Category order saves immediately and is reflected in extension category dropdowns.
+- Import/export retains category order through the existing categories array.
+- No configuration schema migration is required.
 
-Cleanup
--------
-- Consolidated element creation into shared DOM helpers.
-- Moved the complete stylesheet into one versioned style constant and manager.
-- Removed the previous monolithic open() closure and separated responsibilities.
-- Consolidated configuration rollback behavior for category and import changes.
-- Consolidated extension state-changing validation and post-operation checks.
-
-Firefox compatibility retained
-------------------------------
-- Uses window.Services?.prompt with window.prompt/alert/confirm fallbacks.
-- Uses ownerDocument.defaultView to resolve the toolbar button's browser window.
-- Retains the working AddonManager and CustomizableUI module import paths.
-- Continues creating XHTML elements with createElementNS rather than innerHTML.
-
-Compatibility
--------------
-- Existing extensionSwitchboard.config data is used without migration.
-- Existing exported JSON files remain importable.
-- No changes are required to firefox.cfg or autoconfig.js.
-
-Validation performed
---------------------
-- JavaScript syntax check.
-- Mocked Firefox startup and toolbar registration.
-- Mocked panel construction and extension enumeration.
-- Mocked category creation and preference persistence.
-- Mocked extension Apply and Undo flows.
-
-Upgrade
--------
-Replace the existing profile/chrome/ExtensionSwitchboard.uc.js file with the
-contents of ExtensionSwitchboard-v0.6.0.uc.js.txt, removing only the final
-.txt suffix, then completely restart Firefox.
+Upgrade:
+Replace ExtensionSwitchboard.uc.js with the v0.7.0 script and restart Firefox completely.
