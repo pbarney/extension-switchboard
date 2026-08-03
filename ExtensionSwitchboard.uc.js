@@ -8,12 +8,13 @@
  * - Assigns each extension to exactly one user-defined category.
  * - Enables/disables an entire category while retaining individual control.
  * - Stores categories and assignments in the Firefox profile preferences.
+ * - Summarizes each extension's current site-access scope.
  */
 
 (() => {
     "use strict";
 
-    const VERSION = "0.2.1";
+    const VERSION = "0.3.1";
     const WIDGET_ID = "extension-switchboard-button";
     const PANEL_ID = "extension-switchboard-panel";
     const STYLE_ID = "extension-switchboard-style";
@@ -42,10 +43,6 @@
     const preferences = Cc["@mozilla.org/preferences-service;1"]
         .getService(Ci.nsIPrefBranch);
 
-    // Recent Firefox builds expose prompts through Services.prompt rather
-    // than the former @mozilla.org/embedcomp/prompt-service;1 contract.
-    // Keep this optional so the switchboard can still load if prompting
-    // changes again; the category UI falls back to DOM window dialogs.
     const promptService = window.Services?.prompt ?? null;
 
     const reportError = error => {
@@ -302,7 +299,7 @@
             #${PANEL_ID} .sw-list { overflow: auto; padding-block: 5px; }
             #${PANEL_ID} .sw-row {
                 display: grid;
-                grid-template-columns: 28px minmax(0, 1fr) 165px auto;
+                grid-template-columns: 28px minmax(0, 1fr) 165px;
                 gap: 8px;
                 align-items: center;
                 min-height: 54px;
@@ -321,11 +318,11 @@
                 text-overflow: ellipsis;
                 white-space: nowrap;
             }
-            #${PANEL_ID} .sw-id {
+            #${PANEL_ID} .sw-scope {
                 overflow: hidden;
                 margin-top: 2px;
-                font: 11px monospace;
-                opacity: .6;
+                font-size: 11px;
+                opacity: .68;
                 text-overflow: ellipsis;
                 white-space: nowrap;
             }
@@ -334,7 +331,6 @@
                 min-width: 0;
                 min-height: 30px;
             }
-            #${PANEL_ID} .sw-status { font-size: 11px; white-space: nowrap; }
             #${PANEL_ID} .sw-actions { display: flex; gap: 8px; }
             #${PANEL_ID} button {
                 min-height: 32px;
@@ -363,7 +359,6 @@
                 #${PANEL_ID} .sw-row {
                     grid-template-columns: 28px minmax(0, 1fr) 130px;
                 }
-                #${PANEL_ID} .sw-status { display: none; }
             }
         `;
 
@@ -680,12 +675,63 @@
             }
         };
 
-        const getStatus = addon => {
-            const states = [];
-            if (addon.appDisabled) states.push("Firefox-disabled");
-            if (addon.userDisabled) states.push("user-disabled");
-            if (addon.softDisabled) states.push("soft-disabled");
-            return states.join(" + ") || (addon.isActive ? "active" : "inactive");
+        const getSiteAccess = addon => {
+            const permissionSource = addon.userPermissions ??
+                addon.installPermissions ?? null;
+            const hasPermissionMetadata =
+                Array.isArray(permissionSource?.origins) ||
+                Array.isArray(permissionSource?.permissions);
+
+            if (!hasPermissionMetadata) {
+                return {
+                    key: "unknown",
+                    label: "Site access unavailable",
+                    title: "Firefox does not expose site-access information for this extension."
+                };
+            }
+
+            const origins = Array.isArray(permissionSource.origins)
+                ? permissionSource.origins
+                : [];
+            const permissions = Array.isArray(permissionSource.permissions)
+                ? permissionSource.permissions
+                : [];
+            const originSet = new Set(origins);
+            const allSites =
+                originSet.has("<all_urls>") ||
+                originSet.has("*://*/*") ||
+                (originSet.has("http://*/*") &&
+                    originSet.has("https://*/*"));
+
+            if (allSites) {
+                return {
+                    key: "all-sites",
+                    label: "All sites",
+                    title: "This extension has persistent access to all ordinary websites."
+                };
+            }
+
+            if (origins.length > 0) {
+                return {
+                    key: "limited-sites",
+                    label: "Limited sites",
+                    title: "This extension has persistent access only to selected sites or URL patterns."
+                };
+            }
+
+            if (permissions.includes("activeTab")) {
+                return {
+                    key: "on-demand",
+                    label: "On demand",
+                    title: "This extension receives temporary access to the current site after a user action."
+                };
+            }
+
+            return {
+                key: "no-site-access",
+                label: "No site access",
+                title: "This extension does not have persistent or active-tab access to website content."
+            };
         };
 
         const canToggle = addon => {
@@ -730,11 +776,47 @@
             }
         };
 
+        const updateRowStateClasses = row => {
+            row.element.classList.toggle("active", row.currentActive);
+            row.element.classList.toggle(
+                "user-disabled",
+                row.currentUserDisabled
+            );
+            row.element.classList.toggle(
+                "firefox-disabled",
+                row.appDisabled
+            );
+        };
+
+        const updateCheckboxDescription = row => {
+            let title;
+
+            if (row.appDisabled) {
+                title =
+                    "Firefox has disabled this extension, so it cannot be enabled from the switchboard.";
+            } else if (row.locked) {
+                title =
+                    "Firefox does not permit changing this extension from the switchboard.";
+            } else if (row.checkbox.checked !== row.currentActive) {
+                title = row.checkbox.checked
+                    ? "Will be enabled when Apply changes is clicked."
+                    : "Will be disabled when Apply changes is clicked.";
+            } else {
+                title = row.currentActive
+                    ? "Enabled. Clear this checkbox and apply changes to disable it."
+                    : "Disabled. Select this checkbox and apply changes to enable it.";
+            }
+
+            row.checkbox.title = title;
+            row.checkbox.setAttribute("aria-label", `${row.name}: ${title}`);
+        };
+
         const updateRowChangeState = row => {
             row.element.classList.toggle(
                 "changed",
                 row.checkbox.checked !== row.currentActive
             );
+            updateCheckboxDescription(row);
         };
 
         const updateRow = (row, addon) => {
@@ -742,9 +824,14 @@
             row.currentUserDisabled = addon.userDisabled;
             row.appDisabled = addon.appDisabled;
             row.locked = !canToggle(addon);
+            row.siteAccess = getSiteAccess(addon);
             row.checkbox.checked = addon.isActive;
             row.checkbox.disabled = busy || row.locked;
-            row.status.textContent = getStatus(addon);
+            row.scope.textContent = addon.appDisabled
+                ? `Disabled by Firefox · Site access: ${row.siteAccess.label}`
+                : `Site access: ${row.siteAccess.label}`;
+            row.scope.title = row.siteAccess.title;
+            updateRowStateClasses(row);
             updateRowChangeState(row);
         };
 
@@ -762,7 +849,7 @@
 
             row.categorySelect.value = selectedId;
             row.categorySelect.disabled = busy;
-            row.searchText = `${row.name}\n${row.id}\n${categoryById(selectedId).name}`
+            row.searchText = `${row.name}\n${row.id}\n${categoryById(selectedId).name}\n${row.siteAccess.label}`
                 .toLocaleLowerCase();
         };
 
@@ -833,11 +920,16 @@
             const details = createHtmlElement("div");
             const name = createHtmlElement("div", {
                 className: "sw-name",
-                text: addon.name
+                text: addon.name,
+                attributes: { title: `Extension ID: ${addon.id}` }
             });
-            const id = createHtmlElement("div", {
-                className: "sw-id",
-                text: addon.id
+            const siteAccess = getSiteAccess(addon);
+            const scope = createHtmlElement("div", {
+                className: "sw-scope",
+                text: addon.appDisabled
+                    ? `Disabled by Firefox · Site access: ${siteAccess.label}`
+                    : `Site access: ${siteAccess.label}`,
+                attributes: { title: siteAccess.title }
             });
             const categorySelect = createHtmlElement("select", {
                 className: "sw-category-select",
@@ -846,13 +938,9 @@
                     title: "Assign this extension to one category"
                 }
             });
-            const status = createHtmlElement("div", {
-                className: "sw-status",
-                text: getStatus(addon)
-            });
 
-            details.append(name, id);
-            rowElement.append(checkbox, details, categorySelect, status);
+            details.append(name, scope);
+            rowElement.append(checkbox, details, categorySelect);
 
             const row = {
                 id: addon.id,
@@ -862,12 +950,15 @@
                 currentUserDisabled: addon.userDisabled,
                 appDisabled: addon.appDisabled,
                 locked: !canToggle(addon),
+                siteAccess,
                 checkbox,
                 categorySelect,
-                status,
+                scope,
                 element: rowElement
             };
 
+            updateRowStateClasses(row);
+            updateRowChangeState(row);
             rebuildCategorySelect(row);
 
             checkbox.addEventListener("change", () => {
@@ -899,7 +990,7 @@
                     return;
                 }
 
-                row.searchText = `${row.name}\n${row.id}\n${categoryById(newCategoryId).name}`
+                row.searchText = `${row.name}\n${row.id}\n${categoryById(newCategoryId).name}\n${row.siteAccess.label}`
                     .toLocaleLowerCase();
                 keepMessage = true;
                 messageElement.textContent =
@@ -1095,12 +1186,13 @@
                 return;
             }
 
-            selectedCategoryId = category.id;
+            selectedCategoryId = UNCATEGORIZED_ID;
             for (const row of rows) rebuildCategorySelect(row);
             rebuildCategoryList();
             renderRows();
             keepMessage = true;
-            messageElement.textContent = `Created category “${name}”.`;
+            messageElement.textContent =
+                `Created category “${name}”. Showing Uncategorized extensions.`;
         });
 
         renameCategoryElement.addEventListener("click", () => {

@@ -1,7 +1,7 @@
-Extension Switchboard 0.2.0
+Extension Switchboard 0.3.0
 ===========================
 
-UPGRADE FROM 0.1.x
+UPGRADE FROM 0.2.0
 ------------------
 1. Close Firefox completely.
 2. Replace this profile file:
@@ -13,18 +13,37 @@ UPGRADE FROM 0.1.x
 
 The existing firefox.cfg and autoconfig.js do not need to be changed.
 
-NEW IN 0.2.0
+Your existing categories and assignments are fully compatible and are retained.
+
+NEW IN 0.3.0
 ------------
-- User-created categories: create, rename, and delete.
-- Each extension can be assigned to exactly one category.
-- Built-in Uncategorized category.
-- Category checkboxes enable/disable all category members as pending changes.
-- Category names act as filters.
-- Per-extension category selector.
-- Persistent category data stored in the profile preference:
+- Adds current-state row classes for CSS customization:
 
-  extensionSwitchboard.config
+  .sw-row.active
+  .sw-row.user-disabled
+  .sw-row.firefox-disabled
 
-Deleting a category moves its assigned extensions to Uncategorized.
-Category assignments are saved immediately.
-Extension enable/disable changes still require the Apply changes button.
+  More than one class may apply to the same row.
+
+- After creating a category, automatically filters to Uncategorized so
+  extensions can be assigned to the new category immediately.
+- Replaces the visible extension ID with a concise site-access summary:
+
+  All sites
+  Limited sites
+  On demand
+  No site access
+  Site access unavailable
+
+- Keeps extension IDs searchable and exposes each ID in the extension-name
+  tooltip.
+- Removes the redundant status column.
+- Explains Firefox-disabled extensions beside the extension name and through
+  the disabled checkbox tooltip.
+- Keeps category selectors aligned in a fixed grid column.
+
+SITE-ACCESS NOTE
+----------------
+The summary describes the host access currently exposed by Firefox. "On demand"
+means the extension uses activeTab-style temporary access after a user action.
+It does not attempt to list every matched site or URL pattern.
