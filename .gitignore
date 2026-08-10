@@ -1,1 +1,15 @@
+# Release output
 /dist/
+
+# Installer test output
+/tests/installer/Work/
+/tests/installer/*.log
+/tests/installer/*.zip
+/tests/installer/*.sha256
+
+# temporary files
+*.tmp
+*.bak
+
+docs/SECURITY.2.md
+docs/SECURITY.3.md

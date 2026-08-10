@@ -1,0 +1,10 @@
+{
+  "description": "Recognizable but modified legacy loader mixed with unrelated code; installer must refuse to rewrite firefox.cfg.",
+  "expectedExitCode": 1,
+  "configFile": "firefox.cfg",
+  "expectedError": "legacy Extension Switchboard loader",
+  "unchangedFiles": [
+    "firefox-installation/firefox.cfg"
+  ],
+  "note": "The current installer detects this after copying the protected script and updating autoconfig.js; the important assertion is that the ambiguous firefox.cfg remains untouched and a backup exists."
+}

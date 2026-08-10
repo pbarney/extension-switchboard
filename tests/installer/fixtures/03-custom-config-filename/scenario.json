@@ -1,0 +1,14 @@
+{
+  "description": "autoconfig.js points to a custom .cfg filename; firefox.cfg is a decoy.",
+  "expectedExitCode": 0,
+  "configFile": "company-autoconfig.cfg",
+  "preserveMarkers": [
+    "test.custom.filename",
+    "test.company.config.preserved",
+    "KEEP-COMPANY-CFG"
+  ],
+  "absentMarkers": [],
+  "unchangedFiles": [
+    "firefox-installation/firefox.cfg"
+  ]
+}

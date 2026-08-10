@@ -1,0 +1,7 @@
+{
+  "description": "No pre-existing AutoConfig files.",
+  "expectedExitCode": 0,
+  "configFile": "firefox.cfg",
+  "preserveMarkers": [],
+  "absentMarkers": []
+}

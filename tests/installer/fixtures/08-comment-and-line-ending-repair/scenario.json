@@ -1,0 +1,13 @@
+{
+  "description": "Existing files lack the required first-line comment and final newline.",
+  "expectedExitCode": 0,
+  "configFile": "firefox.cfg",
+  "preserveMarkers": [
+    "test.no-comment.pref",
+    "test.no-comment.cfg",
+    "KEEP-ME"
+  ],
+  "absentMarkers": [],
+  "requireLeadingComment": true,
+  "requireLfOnly": true
+}

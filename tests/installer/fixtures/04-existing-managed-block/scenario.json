@@ -1,0 +1,15 @@
+{
+  "description": "Existing managed block should be replaced in place, without duplication.",
+  "expectedExitCode": 0,
+  "configFile": "firefox.cfg",
+  "preserveMarkers": [
+    "KEEP-BEFORE",
+    "KEEP-AFTER"
+  ],
+  "absentMarkers": [
+    "MUST-BE-REPLACED",
+    "C:\\\\OldProfile",
+    "C:\\\\OldScript.uc.js"
+  ],
+  "managedBlockCount": 1
+}

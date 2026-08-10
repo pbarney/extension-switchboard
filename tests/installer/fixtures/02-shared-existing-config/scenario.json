@@ -1,0 +1,12 @@
+{
+  "description": "Existing autoconfig.js and shared firefox.cfg with unrelated preferences/code.",
+  "expectedExitCode": 0,
+  "configFile": "firefox.cfg",
+  "preserveMarkers": [
+    "test.shared.preference",
+    "test.shared.loader.preserved",
+    "KEEP-SHARED-CFG-CODE"
+  ],
+  "absentMarkers": [],
+  "legacyProfileScriptRemoved": true
+}

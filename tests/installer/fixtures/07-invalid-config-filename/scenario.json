@@ -1,0 +1,10 @@
+{
+  "description": "Invalid configured filename should fail during context resolution before installation changes.",
+  "expectedExitCode": 1,
+  "configFile": "bad:name.cfg",
+  "expectedError": "configured AutoConfig filename is invalid",
+  "unchangedFiles": [
+    "firefox-installation/defaults/pref/autoconfig.js",
+    "firefox-installation/firefox.cfg"
+  ]
+}

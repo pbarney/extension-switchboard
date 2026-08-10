@@ -1,0 +1,11 @@
+{
+  "description": "Exact known v0.1-era standalone loader; installer should replace the whole file.",
+  "expectedExitCode": 0,
+  "configFile": "firefox.cfg",
+  "preserveMarkers": [],
+  "absentMarkers": [
+    "Extension Switchboard AutoConfig bootstrap",
+    "directoryService.get(\"UChrm\""
+  ],
+  "managedBlockCount": 1
+}
