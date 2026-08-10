@@ -1,4 +1,4 @@
-# Configuration and data model
+# Data model and Configuration Storage
 
 ## Authoritative storage
 

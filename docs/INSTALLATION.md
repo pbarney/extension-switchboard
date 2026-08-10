@@ -1,211 +1,159 @@
 # Installation, upgrade, rollback, and removal
 
-## Important security notice
+## Recommended installation
 
-Extension Switchboard is privileged browser code, not an ordinary WebExtension. The included AutoConfig setup disables Firefox's AutoConfig sandbox to allow Firefox to load the profile script.
+The recommended Windows installation uses `Install-ExtensionSwitchboard.ps1`.
 
-**Do not install modified or untrusted copies of these files.** If the Firefox installation directory is writable by untrusted users or software, correct that before using this customization.
+The installer:
 
-## Requirements
+- resolves the target Firefox installation and profile before elevation;
+- requests administrator privileges through UAC;
+- backs up existing AutoConfig and Extension Switchboard files;
+- installs the privileged script under `%ProgramData%\ExtensionSwitchboard\Profiles\...`;
+- restricts the installed script with NTFS permissions;
+- creates or updates the required Firefox AutoConfig preferences;
+- adds or replaces the managed Extension Switchboard loader block;
+- preserves unrelated AutoConfig content;
+- removes the older user-writable profile copy after backing it up;
+- verifies the completed installation.
 
-- Desktop Firefox.
-- Permission to write to the Firefox installation directory (typically `C:\Program Files\Mozilla Firefox\`).
-- Permission to write to the active Firefox profile (typically `C:\Users\{username}\AppData\Roaming\Mozilla\Firefox\Profiles\{profile-id}`)
-- A complete Firefox restart after installation or upgrade.
+Firefox needs to be completely closed while installing or upgrading.
 
-Standard Mozilla desktop installations (including Developer Edition) are the primary target. Microsoft Store/MSIX, Snap, Flatpak, and other packaged builds may use different or read-only application locations and aren't covered by these instructions.
+### From a release package
 
-## Package layout
+1. Extract the release.
+2. Optionally verify the published ZIP and file checksums (*see below*).
+3. Exit Firefox completely.
+4. Run:
 
-```text
-ExtensionSwitchboard-v0.6.0-release/
-├── profile/
-│   └── chrome/
-│       └── ExtensionSwitchboard.uc.js
-└── firefox-installation/
-    ├── firefox.cfg
-    └── defaults/
-        └── pref/
-            └── autoconfig.js
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-ExtensionSwitchboard.ps1
 ```
 
-## 1. Back up existing customization files
+5. Approve the UAC prompt.
+6. Restart Firefox normally.
 
-Before copying anything, check whether these files already exist:
+If more than one Firefox installation or profile is detected, the installer prompts for the target.
 
-```text
-<Firefox installation>/firefox.cfg
-<Firefox installation>/defaults/pref/autoconfig.js
-<Firefox profile>/chrome/ExtensionSwitchboard.uc.js
+#### To verify the file hashes, run this command in Powershell:
+
+```
+Get-FileHash <filename-of-downloaded-release-package> -Algorithm SHA256
 ```
 
-If `firefox.cfg` or `autoconfig.js` already exists, do **not** blindly overwrite it. It may load other customizations or enforce organizational preferences. Back it up and merge the Extension Switchboard bootstrap carefully.
+Compare the output of that command with the `SHA256` file included in the release package.
 
-## 2. Find the active profile
+### From the repository
 
-The safest method is:
-
-1. Open `about:support` in Firefox.
-2. Find **Profile Folder** under Application Basics.
-3. Click **Open Folder**.
-
-On a standard Windows installation, profiles are commonly under:
+The canonical files are:
 
 ```text
-%APPDATA%\Mozilla\Firefox\Profiles\
+src\ExtensionSwitchboard.uc.js
+installer\windows\Install-ExtensionSwitchboard.ps1
 ```
 
-Use the active profile shown by `about:support`, not merely the first profile directory you find.
+From the repository root:
 
-## 3. Install the profile script
-
-Inside the active profile, create the `chrome` directory if it doesn't already exist:
-
-```text
-<Firefox profile>\chrome\
+```powershell
+.\installer\windows\Install-ExtensionSwitchboard.ps1 `
+    -SourceScript .\src\ExtensionSwitchboard.uc.js
 ```
 
-Copy:
-
-```text
-profile/chrome/ExtensionSwitchboard.uc.js
-```
-
-to:
-
-```text
-<Firefox profile>\chrome\ExtensionSwitchboard.uc.js
-```
-
-The filename must be exact.
-
-## 4. Find the Firefox installation directory
-
-Typical locations:
-
-### Windows
-
-```text
-C:\Program Files\Mozilla Firefox\
-```
-
-or, for a 32-bit installation:
-
-```text
-C:\Program Files (x86)\Mozilla Firefox\
-```
-
-The current executable path is also shown on `about:support` under **Application Binary**.
-
-### Linux
-
-The location depends on the distribution and installation method, commonly beneath `/usr/lib/firefox`, `/usr/lib64/firefox`, or the directory containing the Firefox executable.
-
-### macOS
-
-Use the application's resources directory:
-
-```text
-Firefox.app/Contents/Resources/
-```
-
-## 5. Install the AutoConfig bootstrap
-
-Copy:
-
-```text
-firefox-installation/firefox.cfg
-```
-
-to the top level of the Firefox installation directory:
-
-```text
-<Firefox installation>/firefox.cfg
-```
-
-Copy:
-
-```text
-firefox-installation/defaults/pref/autoconfig.js
-```
-
-to:
-
-```text
-<Firefox installation>/defaults/pref/autoconfig.js
-```
-
-`autoconfig.js` must retain Unix/LF line endings, including on Windows. The packaged file already uses LF endings.
-
-Both files begin with a comment as required by Firefox AutoConfig.
-
-## 6. Restart Firefox completely
-
-1. Exit all Firefox windows.
-2. Verify no Firefox processes remain.
-3. Start Firefox again.
-
-A new **Extension Switchboard** button should appear in the navigation toolbar. Because it is registered through Firefox's customizable toolbar system, it can be moved through **Customize Toolbar**.
-
-If the button doesn't appear, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+The installer still performs its own elevation.
 
 ## Existing AutoConfig installations
 
-The included `autoconfig.js` contains:
+The installer is designed to preserve any unrelated AutoConfig content.
 
-```javascript
-pref("general.config.filename", "firefox.cfg");
-pref("general.config.obscure_value", 0);
-pref("general.config.sandbox_enabled", false);
+If `autoconfig.js` or the configured `.cfg` file already exists, the installer backs it up and modifies only the parts it manages.
+
+Backups are stored under:
+
+```text
+%ProgramData%\ExtensionSwitchboard\Backups\
 ```
-
-If an existing `autoconfig.js` already identifies a different configuration filename, either retain that filename and merge the loader into the existing configuration file, or deliberately standardize the setup after backing it up.
-
-The included `firefox.cfg` is a loader. It resolves the active profile's `chrome` directory and loads `ExtensionSwitchboard.uc.js` into each browser window after delayed startup.
 
 ## Upgrade
 
-For ordinary Extension Switchboard upgrades:
+Upgrades use the same path as installation. No uninstall is required before upgrading.
 
-1. Back up the current `ExtensionSwitchboard.uc.js`.
-2. Replace it with the newer release's profile script.
-3. Completely restart Firefox.
+1. Extract the newer release.
+2. Exit Firefox completely.
+3. Run the newer `Install-ExtensionSwitchboard.ps1`.
+4. Restart Firefox.
 
-The installation-level `firefox.cfg` and `autoconfig.js` normally don't need replacement unless the release notes explicitly say the bootstrap changed.
+The installer backs up the current files, replaces the protected script, refreshes the managed loader configuration, reapplies permissions, and verifies the installation.
 
-The v0.6.0 configuration schema remains compatible with prior category-enabled releases.
+Saved categories and assignments remain.
+
+## Verify an installation
+
+With Firefox closed:
+
+```powershell
+.\Install-ExtensionSwitchboard.ps1 -Action Verify
+```
+
+Verification checks the required AutoConfig files, managed loader, protected script, and expected permissions.
 
 ## Rollback
 
+The simplest rollback is to run the installer from a previous known-working release.
+
 1. Exit Firefox completely.
-2. Replace `ExtensionSwitchboard.uc.js` with the previous known-working version.
-3. Restart Firefox.
+2. Extract the previous release.
+3. Run its installer normally.
+4. Restart Firefox.
 
-Category configuration remains in `extensionSwitchboard.config`. Current releases sanitize unsupported or malformed data rather than intentionally deleting the preference.
+Installer-created backups under `%ProgramData%\ExtensionSwitchboard\Backups\` are also available for manual recovery if needed.
 
-For extra safety, export the configuration before an upgrade.
+Configuration stored in `extensionSwitchboard.config` isn't removed by a normal reinstall or rollback.
 
 ## Uninstall
 
-1. Exit Firefox completely.
-2. Remove:
+With Firefox closed:
 
-   ```text
-   <Firefox profile>/chrome/ExtensionSwitchboard.uc.js
-   ```
+```powershell 
+.\Install-ExtensionSwitchboard.ps1 -Action Uninstall
+```
 
-3. Remove `firefox.cfg` and `defaults/pref/autoconfig.js` only if they are used exclusively by Extension Switchboard. If they are shared with other customizations, remove only the Extension Switchboard loader and related preferences.
-4. Restart Firefox.
+The installer removes the script and the Extension Switchboard loader block from the `firefox.cfg`.
 
-Optional configuration cleanup:
+It **doesn't** blindly delete shared AutoConfig files or preferences, because other Firefox customizations could be using them. Review the remaining AutoConfig configuration afterward.
 
-1. Open `about:config`.
-2. Search for:
+If no remaining AutoConfig code requires privileged execution, you can turn the AutoConfig sandbox back on. Reset this:
 
-   ```text
-   extensionSwitchboard.config
-   ```
+```javascript
+pref("general.config.sandbox_enabled", false);
+```
 
-3. Reset or delete that preference.
+The normal secure setting is:
 
-Removing the configuration preference deletes saved categories and assignments, but it doesn't change the current enabled/disabled state of extensions.
+```javascript
+pref("general.config.sandbox_enabled", true);
+```
+
+Removing Extension Switchboard doesn't change the current enabled/disabled state of extensions.
+
+To remove your saved categories and assignments, go to `about:config` and delete `extensionSwitchboard.config`.
+
+## Manual installation
+
+A manual installation is documented in:
+
+[installer/manual/README.md](../installer/manual/README.md)
+
+The manual method loads `ExtensionSwitchboard.uc.js` from the Firefox profile. That may be useful for advanced/manual setups but it's more prone to local tampering than using the installation program, so only proceed with that for quick testing or if you really understand what you're doing.
+
+## Requirements and unsupported installations
+
+Using the installer assumes:
+
+- Windows PowerShell 5.1 or later;
+- NTFS permissions;
+- a standard desktop Firefox installation;
+- permission to approve administrator elevation.
+
+Microsoft Store/MSIX, Snap, Flatpak, and similar packaged Firefox distributions might use different or read-only installation layouts and aren't supported by the Windows installer.
+
+For problems, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
